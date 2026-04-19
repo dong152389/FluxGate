@@ -4,11 +4,13 @@ const state = {
 	preview: null,
 	authMode: "login",
 	notice: null,
+	toasts: [],
 	sourceChecks: {},
 	loading: true,
 };
 
 const app = document.getElementById("app");
+const toastTimers = new Map();
 
 boot();
 
@@ -37,6 +39,11 @@ document.addEventListener("click", async (event) => {
 	const action = button.dataset.action;
 
 	try {
+		if (action === "dismiss-toast") {
+			removeToast(button.dataset.id);
+			return;
+		}
+
 		if (action === "switch-auth") {
 			state.authMode = button.dataset.mode || "login";
 			render();
@@ -62,7 +69,9 @@ document.addEventListener("click", async (event) => {
 		}
 
 		if (action === "test-source") {
-			await handleTestSource(button.dataset.id);
+			await withBusy(button, "测试中...", async () => {
+				await handleTestSource(button.dataset.id);
+			});
 			return;
 		}
 
@@ -85,7 +94,7 @@ document.addEventListener("click", async (event) => {
 
 		if (action === "copy-raw-output") {
 			if (!state.preview) {
-				pushNotice("请先生成预览");
+				pushNotice("请先生成预览", false, "warn");
 				return;
 			}
 			await copyText(state.preview.rawText, "聚合文本已复制");
@@ -94,7 +103,7 @@ document.addEventListener("click", async (event) => {
 
 		if (action === "copy-b64-output") {
 			if (!state.preview) {
-				pushNotice("请先生成预览");
+				pushNotice("请先生成预览", false, "warn");
 				return;
 			}
 			await copyText(state.preview.encodedText, "Base64 订阅已复制");
@@ -102,45 +111,57 @@ document.addEventListener("click", async (event) => {
 		}
 
 		if (action === "preview") {
-			await loadPreview();
+			await withBusy(button, "生成中...", async () => {
+				await loadPreview();
+			});
 			return;
 		}
 
 		if (action === "save-config") {
-			await saveConfig();
+			await withBusy(button, "保存中...", async () => {
+				await saveConfig();
+			});
 			return;
 		}
 
 		if (action === "refresh-cache") {
-			const result = await api("/api/refresh", { method: "POST" });
-			state.config.publicUrl = result.publicUrl;
-			pushNotice("缓存版本已刷新，新的拉取会重新聚合");
-			render();
+			await withBusy(button, "刷新中...", async () => {
+				const result = await api("/api/refresh", { method: "POST" });
+				state.config.publicUrl = result.publicUrl;
+				pushNotice("缓存版本已刷新，新的拉取会重新聚合");
+				render();
+			});
 			return;
 		}
 
 		if (action === "reset-token") {
-			const result = await api("/api/auth/reset-public-token", { method: "POST" });
-			state.config.publicToken = result.publicToken;
-			state.config.publicUrl = result.publicUrl;
-			pushNotice("公开订阅 token 已重置，旧链接已失效");
-			render();
+			await withBusy(button, "重置中...", async () => {
+				const result = await api("/api/auth/reset-public-token", { method: "POST" });
+				state.config.publicToken = result.publicToken;
+				state.config.publicUrl = result.publicUrl;
+				pushNotice("公开订阅 token 已重置，旧链接已失效");
+				render();
+			});
 			return;
 		}
 
 		if (action === "logout") {
-			await api("/api/auth/logout", { method: "POST" });
-			state.user = null;
-			state.config = null;
-			state.preview = null;
-			state.sourceChecks = {};
-			pushNotice("已退出登录");
-			render();
+			await withBusy(button, "退出中...", async () => {
+				await api("/api/auth/logout", { method: "POST" });
+				state.user = null;
+				state.config = null;
+				state.preview = null;
+				state.sourceChecks = {};
+				pushNotice("已退出登录");
+				render();
+			});
 			return;
 		}
 
 		if (action === "save-alias") {
-			await saveAlias(button.dataset.fingerprint);
+			await withBusy(button, "保存中...", async () => {
+				await saveAlias(button.dataset.fingerprint);
+			});
 		}
 	} catch (error) {
 		pushNotice(error.message || "操作失败", true);
@@ -155,15 +176,20 @@ document.addEventListener("submit", async (event) => {
 	}
 
 	event.preventDefault();
+	const submitter = event.submitter instanceof HTMLButtonElement ? event.submitter : null;
 
 	try {
 		if (form.dataset.form === "auth") {
-			await submitAuth(form);
+			await withBusy(submitter, state.authMode === "register" ? "创建中..." : "登录中...", async () => {
+				await submitAuth(form);
+			});
 			return;
 		}
 
 		if (form.dataset.form === "password") {
-			await submitPasswordChange(form);
+			await withBusy(submitter, "更新中...", async () => {
+				await submitPasswordChange(form);
+			});
 		}
 	} catch (error) {
 		pushNotice(error.message || "提交失败", true);
@@ -199,13 +225,13 @@ function renderLoading() {
 				</section>
 			</div>
 		</div>
+		${renderToasts()}
 	`;
 }
 
 function renderAuth() {
 	return `
 		<div class="auth-wrap">
-			${renderNotice()}
 			<div class="auth-card">
 				<section class="auth-hero">
 					<div class="eyebrow">Secure Merge</div>
@@ -243,6 +269,7 @@ function renderAuth() {
 				</section>
 			</div>
 		</div>
+		${renderToasts()}
 	`;
 }
 
@@ -253,7 +280,6 @@ function renderDashboard() {
 
 	return `
 		<div class="shell">
-			${renderNotice()}
 			<section class="hero">
 				<div class="hero-card">
 					<div class="eyebrow">FluxGate Console</div>
@@ -413,6 +439,7 @@ function renderDashboard() {
 				</div>
 			</section>
 		</div>
+		${renderToasts()}
 	`;
 }
 
@@ -744,11 +771,21 @@ async function api(path, options = {}) {
 	return data;
 }
 
-function pushNotice(message, isError = false) {
+function pushNotice(message, isError = false, kindOverride = null) {
+	const kind = kindOverride || (isError ? "error" : "success");
+	const toast = {
+		id: crypto.randomUUID(),
+		message,
+		kind,
+	};
+
 	state.notice = {
 		message,
 		isError,
 	};
+	state.toasts = [...state.toasts, toast].slice(-4);
+	scheduleToastRemoval(toast.id, kind === "error" ? 5200 : 3200);
+	render();
 }
 
 function renderNotice() {
@@ -762,6 +799,96 @@ async function copyText(value, successMessage) {
 	await navigator.clipboard.writeText(value);
 	pushNotice(successMessage);
 	render();
+}
+
+function renderToasts() {
+	if (!state.toasts.length) {
+		return "";
+	}
+
+	return `
+		<div class="toast-viewport" aria-live="polite" aria-atomic="true">
+			${state.toasts
+				.map(
+					(toast) => `
+						<div class="toast toast-${toast.kind}">
+							<div class="toast-mark">${getToastMark(toast.kind)}</div>
+							<div class="toast-copy">
+								<strong>${getToastTitle(toast.kind)}</strong>
+								<div>${escapeHtml(toast.message)}</div>
+							</div>
+							<button class="toast-close" type="button" data-action="dismiss-toast" data-id="${toast.id}" aria-label="关闭提示">x</button>
+						</div>
+					`,
+				)
+				.join("")}
+		</div>
+	`;
+}
+
+function getToastTitle(kind) {
+	if (kind === "error") {
+		return "操作失败";
+	}
+	if (kind === "warn") {
+		return "请注意";
+	}
+	return "操作成功";
+}
+
+function getToastMark(kind) {
+	if (kind === "error") {
+		return "!";
+	}
+	if (kind === "warn") {
+		return "?";
+	}
+	return "OK";
+}
+
+function scheduleToastRemoval(id, delay) {
+	if (toastTimers.has(id)) {
+		clearTimeout(toastTimers.get(id));
+	}
+
+	const timer = setTimeout(() => {
+		toastTimers.delete(id);
+		removeToast(id);
+	}, delay);
+	toastTimers.set(id, timer);
+}
+
+function removeToast(id) {
+	if (!id) {
+		return;
+	}
+
+	if (toastTimers.has(id)) {
+		clearTimeout(toastTimers.get(id));
+		toastTimers.delete(id);
+	}
+
+	state.toasts = state.toasts.filter((toast) => toast.id !== id);
+	render();
+}
+
+async function withBusy(button, pendingText, task) {
+	if (!button) {
+		return task();
+	}
+
+	const originalText = button.textContent;
+	button.disabled = true;
+	button.classList.add("is-busy");
+	button.textContent = pendingText;
+
+	try {
+		return await task();
+	} finally {
+		button.disabled = false;
+		button.classList.remove("is-busy");
+		button.textContent = originalText;
+	}
 }
 
 function escapeHtml(value) {

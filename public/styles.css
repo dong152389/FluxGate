@@ -175,6 +175,102 @@ body::after {
 	color: var(--danger);
 }
 
+.toast-viewport {
+	position: fixed;
+	top: 18px;
+	right: 18px;
+	width: min(360px, calc(100vw - 28px));
+	display: grid;
+	gap: 10px;
+	z-index: 50;
+	pointer-events: none;
+}
+
+.toast {
+	display: grid;
+	grid-template-columns: auto 1fr auto;
+	align-items: start;
+	gap: 12px;
+	padding: 14px 16px;
+	border-radius: 20px;
+	border: 1px solid rgba(95, 64, 35, 0.12);
+	background: rgba(255, 250, 244, 0.97);
+	box-shadow: 0 18px 40px rgba(47, 36, 25, 0.16);
+	backdrop-filter: blur(16px);
+	pointer-events: auto;
+	animation: toast-in 180ms ease;
+}
+
+.toast-success {
+	border-color: rgba(31, 122, 72, 0.18);
+	background: rgba(243, 255, 248, 0.98);
+}
+
+.toast-error {
+	border-color: rgba(168, 56, 43, 0.18);
+	background: rgba(255, 243, 241, 0.98);
+}
+
+.toast-warn {
+	border-color: rgba(200, 93, 38, 0.18);
+	background: rgba(255, 248, 240, 0.98);
+}
+
+.toast-mark {
+	min-width: 38px;
+	height: 38px;
+	display: inline-grid;
+	place-items: center;
+	border-radius: 14px;
+	font-family: "Space Grotesk", sans-serif;
+	font-size: 0.88rem;
+	font-weight: 700;
+	background: rgba(255, 255, 255, 0.86);
+	color: var(--accent-strong);
+}
+
+.toast-success .toast-mark {
+	color: var(--success);
+}
+
+.toast-error .toast-mark {
+	color: var(--danger);
+}
+
+.toast-warn .toast-mark {
+	color: var(--accent-strong);
+}
+
+.toast-copy {
+	display: grid;
+	gap: 4px;
+	min-width: 0;
+}
+
+.toast-copy strong {
+	font-size: 0.94rem;
+}
+
+.toast-copy div {
+	color: var(--muted);
+	line-height: 1.5;
+	word-break: break-word;
+	font-size: 0.92rem;
+}
+
+.toast-close {
+	background: transparent;
+	color: var(--muted);
+	padding: 4px;
+	border-radius: 10px;
+	line-height: 1;
+}
+
+.toast-close:hover {
+	background: rgba(95, 64, 35, 0.08);
+	transform: none;
+}
+
 .grid {
 	display: grid;
 	grid-template-columns: minmax(0, 1.4fr) minmax(360px, 0.9fr);
@@ -260,6 +356,17 @@ button:hover {
 .btn-small {
 	padding: 8px 12px;
 	font-size: 0.9rem;
+}
+
+button:disabled,
+.btn:disabled {
+	cursor: wait;
+	opacity: 0.72;
+	transform: none;
+}
+
+.is-busy {
+	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
 }
 
 .pill {
@@ -499,6 +606,18 @@ textarea {
 	margin-top: 14px;
 	color: var(--muted);
 	font-size: 0.92rem;
+}
+
+@keyframes toast-in {
+	from {
+		opacity: 0;
+		transform: translateY(-8px) scale(0.98);
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
 }
 
 @media (max-width: 1080px) {
