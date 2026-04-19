@@ -1,0 +1,429 @@
+import {
+	buildPublicUrl,
+	decryptText,
+	encryptText,
+	nowIso,
+	randomId,
+	randomToken,
+} from "./security";
+import type {
+	AppEnv,
+	AggregationConfigResponse,
+	NodeAliasRow,
+	PublicSubscriptionContext,
+	RenameRuleConfig,
+	RenameRuleRow,
+	SaveConfigPayload,
+	SessionUserRow,
+	SourceConfig,
+	SourceRow,
+	UserProfile,
+	UserRow,
+	UserSettingsConfig,
+	UserSettingsRow,
+} from "./types";
+
+export async function findUserByUsername(
+	db: D1Database,
+	username: string,
+): Promise<UserRow | null> {
+	return (
+		(await db
+			.prepare("SELECT * FROM users WHERE username = ?")
+			.bind(username)
+			.first<UserRow>()) ?? null
+	);
+}
+
+export async function findUserById(
+	db: D1Database,
+	userId: string,
+): Promise<UserRow | null> {
+	return (
+		(await db.prepare("SELECT * FROM users WHERE id = ?").bind(userId).first<UserRow>()) ?? null
+	);
+}
+
+export async function createUser(
+	env: AppEnv,
+	input: {
+		username: string;
+		email: string | null;
+		passwordHash: string;
+		passwordSalt: string;
+	},
+): Promise<UserProfile> {
+	const db = env.DB;
+	const userId = randomId();
+	const timestamp = nowIso();
+
+	await db
+		.prepare(
+			`INSERT INTO users (id, username, email, password_hash, password_salt, status, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+		)
+		.bind(
+			userId,
+			input.username,
+			input.email,
+			input.passwordHash,
+			input.passwordSalt,
+			timestamp,
+			timestamp,
+		)
+		.run();
+
+	await db
+		.prepare(
+			`INSERT INTO user_settings
+			 (user_id, public_token, dedupe_enabled, prefix_source_name, source_prefix_template, keep_unnamed, sort_mode, cache_version, created_at, updated_at)
+			 VALUES (?, ?, 1, 1, '[{{source}}] ', 1, 'source-priority', 1, ?, ?)`,
+		)
+		.bind(userId, randomToken(24), timestamp, timestamp)
+		.run();
+
+	return {
+		id: userId,
+		username: input.username,
+		email: input.email,
+	};
+}
+
+export async function createSession(
+	db: D1Database,
+	userId: string,
+	ttlSeconds: number,
+): Promise<string> {
+	const token = randomToken(32);
+	const tokenHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+	const tokenHashValue = btoa(String.fromCharCode(...new Uint8Array(tokenHash)))
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_")
+		.replace(/=+$/g, "");
+
+	const createdAt = nowIso();
+	const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+
+	await db
+		.prepare(
+			`INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, last_seen_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+		)
+		.bind(randomId(), userId, tokenHashValue, expiresAt, createdAt, createdAt)
+		.run();
+
+	return token;
+}
+
+export async function findSessionUser(
+	db: D1Database,
+	tokenHash: string,
+): Promise<SessionUserRow | null> {
+	return (
+		(await db
+			.prepare(
+				`SELECT
+				 sessions.id AS session_id,
+				 sessions.expires_at,
+				 sessions.last_seen_at,
+				 users.id AS user_id,
+				 users.username,
+				 users.email,
+				 users.status
+				 FROM sessions
+				 JOIN users ON users.id = sessions.user_id
+				 WHERE sessions.token_hash = ?`,
+			)
+			.bind(tokenHash)
+			.first<SessionUserRow>()) ?? null
+	);
+}
+
+export async function touchSession(
+	db: D1Database,
+	sessionId: string,
+): Promise<void> {
+	await db
+		.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?")
+		.bind(nowIso(), sessionId)
+		.run();
+}
+
+export async function deleteSessionByHash(
+	db: D1Database,
+	tokenHash: string,
+): Promise<void> {
+	await db.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(tokenHash).run();
+}
+
+export async function listSources(
+	db: D1Database,
+	userId: string,
+): Promise<SourceRow[]> {
+	const result = await db
+		.prepare("SELECT * FROM sources WHERE user_id = ? ORDER BY priority ASC, name ASC")
+		.bind(userId)
+		.all<SourceRow>();
+	return result.results ?? [];
+}
+
+export async function listRenameRules(
+	db: D1Database,
+	userId: string,
+): Promise<RenameRuleRow[]> {
+	const result = await db
+		.prepare("SELECT * FROM rename_rules WHERE user_id = ? ORDER BY rule_order ASC, id ASC")
+		.bind(userId)
+		.all<RenameRuleRow>();
+	return result.results ?? [];
+}
+
+export async function listAliases(
+	db: D1Database,
+	userId: string,
+): Promise<Map<string, string>> {
+	const result = await db
+		.prepare("SELECT * FROM node_aliases WHERE user_id = ?")
+		.bind(userId)
+		.all<NodeAliasRow>();
+	return new Map((result.results ?? []).map((entry) => [entry.fingerprint, entry.alias]));
+}
+
+export async function getSettings(
+	db: D1Database,
+	userId: string,
+): Promise<UserSettingsRow | null> {
+	return (
+		(await db
+			.prepare("SELECT * FROM user_settings WHERE user_id = ?")
+			.bind(userId)
+			.first<UserSettingsRow>()) ?? null
+	);
+}
+
+export async function getConfigResponse(
+	request: Request,
+	env: AppEnv,
+	user: UserProfile,
+): Promise<AggregationConfigResponse> {
+	const settings = await getSettingsOrThrow(env.DB, user.id);
+	const sourceRows = await listSources(env.DB, user.id);
+	const renameRuleRows = await listRenameRules(env.DB, user.id);
+
+	const sources = await Promise.all(
+		sourceRows.map(async (source) => ({
+			id: source.id,
+			name: source.name,
+			url: await decryptText(source.url_encrypted, env),
+			enabled: Boolean(source.enabled),
+			priority: source.priority,
+			notes: source.notes ?? "",
+		} satisfies SourceConfig)),
+	);
+
+	const renameRules = renameRuleRows.map(
+		(rule) =>
+			({
+				id: rule.id,
+				type: rule.type,
+				enabled: Boolean(rule.enabled),
+				match: rule.match_text ?? "",
+				replace: rule.replace_text ?? "",
+				value: rule.value_text ?? "",
+				order: rule.rule_order,
+			}) satisfies RenameRuleConfig,
+	);
+
+	return {
+		user,
+		publicToken: settings.public_token,
+		publicUrl: buildPublicUrl(request, env, settings.public_token),
+		settings: settingsRowToConfig(settings),
+		sources,
+		renameRules,
+	};
+}
+
+export function settingsRowToConfig(settings: UserSettingsRow): UserSettingsConfig {
+	return {
+		dedupeEnabled: Boolean(settings.dedupe_enabled),
+		prefixSourceName: Boolean(settings.prefix_source_name),
+		sourcePrefixTemplate: settings.source_prefix_template,
+		keepUnnamed: Boolean(settings.keep_unnamed),
+		sortMode: settings.sort_mode,
+	};
+}
+
+export async function saveConfig(
+	env: AppEnv,
+	userId: string,
+	payload: SaveConfigPayload,
+): Promise<void> {
+	const db = env.DB;
+	const timestamp = nowIso();
+
+	await db
+		.prepare(
+			`UPDATE user_settings
+			 SET dedupe_enabled = ?,
+			     prefix_source_name = ?,
+			     source_prefix_template = ?,
+			     keep_unnamed = ?,
+			     sort_mode = ?,
+			     cache_version = cache_version + 1,
+			     updated_at = ?
+			 WHERE user_id = ?`,
+		)
+		.bind(
+			payload.settings.dedupeEnabled ? 1 : 0,
+			payload.settings.prefixSourceName ? 1 : 0,
+			payload.settings.sourcePrefixTemplate,
+			payload.settings.keepUnnamed ? 1 : 0,
+			payload.settings.sortMode,
+			timestamp,
+			userId,
+		)
+		.run();
+
+	await db.prepare("DELETE FROM sources WHERE user_id = ?").bind(userId).run();
+	for (const source of payload.sources) {
+		await db
+			.prepare(
+				`INSERT INTO sources
+				 (id, user_id, name, url_encrypted, enabled, priority, notes, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.bind(
+				source.id,
+				userId,
+				source.name,
+				await encryptText(source.url, env),
+				source.enabled ? 1 : 0,
+				source.priority,
+				source.notes,
+				timestamp,
+				timestamp,
+			)
+			.run();
+	}
+
+	await db.prepare("DELETE FROM rename_rules WHERE user_id = ?").bind(userId).run();
+	for (const rule of payload.renameRules) {
+		await db
+			.prepare(
+				`INSERT INTO rename_rules
+				 (id, user_id, type, enabled, match_text, replace_text, value_text, rule_order, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.bind(
+				rule.id,
+				userId,
+				rule.type,
+				rule.enabled ? 1 : 0,
+				rule.match,
+				rule.replace,
+				rule.value,
+				rule.order,
+				timestamp,
+				timestamp,
+			)
+			.run();
+	}
+}
+
+export async function saveAlias(
+	db: D1Database,
+	userId: string,
+	fingerprint: string,
+	alias: string,
+): Promise<void> {
+	if (!alias) {
+		await db
+			.prepare("DELETE FROM node_aliases WHERE user_id = ? AND fingerprint = ?")
+			.bind(userId, fingerprint)
+			.run();
+		return;
+	}
+
+	await db
+		.prepare(
+			`INSERT INTO node_aliases (user_id, fingerprint, alias, updated_at)
+			 VALUES (?, ?, ?, ?)
+			 ON CONFLICT(user_id, fingerprint) DO UPDATE
+			 SET alias = excluded.alias,
+			     updated_at = excluded.updated_at`,
+		)
+		.bind(userId, fingerprint, alias, nowIso())
+		.run();
+}
+
+export async function bumpCacheVersion(
+	db: D1Database,
+	userId: string,
+): Promise<UserSettingsRow> {
+	await db
+		.prepare(
+			"UPDATE user_settings SET cache_version = cache_version + 1, updated_at = ? WHERE user_id = ?",
+		)
+		.bind(nowIso(), userId)
+		.run();
+	return getSettingsOrThrow(db, userId);
+}
+
+export async function rotatePublicToken(
+	db: D1Database,
+	userId: string,
+): Promise<UserSettingsRow> {
+	await db
+		.prepare(
+			`UPDATE user_settings
+			 SET public_token = ?, cache_version = cache_version + 1, updated_at = ?
+			 WHERE user_id = ?`,
+		)
+		.bind(randomToken(24), nowIso(), userId)
+		.run();
+	return getSettingsOrThrow(db, userId);
+}
+
+export async function getPublicSubscriptionContext(
+	db: D1Database,
+	token: string,
+): Promise<PublicSubscriptionContext | null> {
+	const settings =
+		(await db
+			.prepare("SELECT * FROM user_settings WHERE public_token = ?")
+			.bind(token)
+			.first<UserSettingsRow>()) ?? null;
+
+	if (!settings) {
+		return null;
+	}
+
+	const user = await findUserById(db, settings.user_id);
+	if (!user || user.status !== "active") {
+		return null;
+	}
+
+	return {
+		user: {
+			id: user.id,
+			username: user.username,
+			email: user.email,
+		},
+		settings,
+		sources: await listSources(db, user.id),
+		renameRules: await listRenameRules(db, user.id),
+		aliases: await listAliases(db, user.id),
+	};
+}
+
+export async function getSettingsOrThrow(
+	db: D1Database,
+	userId: string,
+): Promise<UserSettingsRow> {
+	const settings = await getSettings(db, userId);
+	if (!settings) {
+		throw new Error("User settings missing");
+	}
+	return settings;
+}
