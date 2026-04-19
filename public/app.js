@@ -3,6 +3,7 @@ const state = {
 	config: null,
 	preview: null,
 	authMode: "login",
+	activeView: "overview",
 	notice: null,
 	toasts: [],
 	sourceChecks: {},
@@ -55,6 +56,12 @@ document.addEventListener("click", async (event) => {
 		}
 
 		syncDraftConfig();
+
+		if (action === "switch-view") {
+			state.activeView = button.dataset.view || "overview";
+			render();
+			return;
+		}
 
 		if (action === "add-source") {
 			state.config.sources.push(blankSource());
@@ -152,6 +159,7 @@ document.addEventListener("click", async (event) => {
 				state.config = null;
 				state.preview = null;
 				state.sourceChecks = {};
+				state.activeView = "overview";
 				pushNotice("已退出登录");
 				render();
 			});
@@ -251,17 +259,17 @@ function renderAuth() {
 					<form data-form="auth" data-mode="${state.authMode}" class="stack">
 						<div class="field">
 							<label for="auth-username">用户名</label>
-							<input id="auth-username" name="username" placeholder="例如 dong5" autocomplete="username" required />
+							<input id="auth-username" name="username" placeholder="请输入账号" autocomplete="username" required />
 						</div>
 						${state.authMode === "register"
 							? `<div class="field">
 									<label for="auth-email">邮箱（可选）</label>
-									<input id="auth-email" name="email" placeholder="you@example.com" autocomplete="email" />
+									<input id="auth-email" name="email" placeholder="请输入邮箱" autocomplete="email" />
 								</div>`
 							: ""}
 						<div class="field">
 							<label for="auth-password">密码</label>
-							<input id="auth-password" name="password" type="password" autocomplete="${state.authMode === "register" ? "new-password" : "current-password"}" required />
+							<input id="auth-password" name="password" type="password" placeholder="请输入密码" autocomplete="${state.authMode === "register" ? "new-password" : "current-password"}" required />
 						</div>
 						<button class="btn btn-primary" type="submit">${state.authMode === "register" ? "创建账号并进入控制台" : "登录控制台"}</button>
 					</form>
@@ -273,173 +281,265 @@ function renderAuth() {
 	`;
 }
 
+const NAV_ITEMS = [
+	{ id: "overview", label: "概览", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><rect x="2" y="2" width="5.5" height="5.5" rx="1.2"/><rect x="8.5" y="2" width="5.5" height="5.5" rx="1.2"/><rect x="2" y="8.5" width="5.5" height="5.5" rx="1.2"/><rect x="8.5" y="8.5" width="5.5" height="5.5" rx="1.2"/></svg>` },
+	{ id: "sources", label: "订阅源", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none"/><path d="M4 4.5a5 5 0 0 0 0 7M12 4.5a5 5 0 0 1 0 7"/><path d="M2 2.5a8 8 0 0 0 0 11M14 2.5a8 8 0 0 1 0 11"/></svg>` },
+	{ id: "rules", label: "聚合规则", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><path d="M2 4h12M2 8h12M2 12h12"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/><circle cx="11" cy="8" r="1.4" fill="currentColor"/><circle cx="5" cy="12" r="1.4" fill="currentColor"/></svg>` },
+	{ id: "preview", label: "节点预览", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><path d="M1.5 8C4 3.5 12 3.5 14.5 8c-2.5 4.5-10.5 4.5-13 0z"/><circle cx="8" cy="8" r="2"/></svg>` },
+	{ id: "account", label: "账号安全", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3 14c0-3.5 10-3.5 10 0"/></svg>` },
+];
+
 function renderDashboard() {
+	const view = state.activeView || "overview";
+	return `
+		<div class="app-dashboard">
+			${renderSidebar(view)}
+			<main class="workspace">
+				${renderWorkspace(view)}
+			</main>
+		</div>
+		${renderToasts()}
+	`;
+}
+
+function renderSidebar(activeView) {
+	const username = state.user?.username || "";
+	const initial = username.slice(0, 1).toUpperCase() || "U";
+	return `
+		<aside class="sidebar">
+			<div class="sidebar-brand">
+				<span class="brand-mark">Fx</span>
+				<div class="brand-meta">
+					<strong>FluxGate</strong>
+					<small>订阅聚合控制台</small>
+				</div>
+			</div>
+			<nav class="sidebar-nav">
+				${NAV_ITEMS.map((item) => `
+					<button class="nav-item ${item.id === activeView ? "active" : ""}" data-action="switch-view" data-view="${item.id}">
+						<span class="nav-icon">${item.icon}</span>
+						<span>${item.label}</span>
+					</button>
+				`).join("")}
+			</nav>
+			<div class="sidebar-footer">
+				<div class="user-chip">
+					<span class="avatar">${escapeHtml(initial)}</span>
+					<div class="user-meta">
+						<strong>${escapeHtml(username)}</strong>
+						<small>已登录</small>
+					</div>
+				</div>
+				<button class="btn btn-secondary btn-small btn-block" data-action="logout">退出登录</button>
+			</div>
+		</aside>
+	`;
+}
+
+function renderWorkspace(view) {
+	if (view === "sources") return renderSourcesView();
+	if (view === "rules") return renderRulesView();
+	if (view === "preview") return renderPreviewView();
+	if (view === "account") return renderAccountView();
+	return renderOverview();
+}
+
+function renderWorkspaceHead(breadcrumb, title, description, actions = "") {
+	return `
+		<header class="workspace-head">
+			<div class="workspace-head-text">
+				<span class="breadcrumb">${escapeHtml(breadcrumb)}</span>
+				<h1>${escapeHtml(title)}</h1>
+				${description ? `<p class="muted">${escapeHtml(description)}</p>` : ""}
+			</div>
+			${actions ? `<div class="head-actions">${actions}</div>` : ""}
+		</header>
+	`;
+}
+
+function renderOverview() {
 	const sourceCount = state.config.sources.length;
 	const ruleCount = state.config.renameRules.length;
 	const previewCount = state.preview?.nodeCount ?? 0;
-
+	const username = state.user?.username || "";
 	return `
-		<div class="shell">
-			<section class="hero">
-				<div class="hero-card">
-					<div class="eyebrow">FluxGate Console</div>
-					<h1>聚合多个订阅，发布一个稳定入口。</h1>
-					<p>当前账号 <strong>${escapeHtml(state.user.username)}</strong> 正在管理自己的订阅源、改名规则和公开拉取 token。你可以先保存配置，再生成预览或刷新公开缓存。</p>
-					<div class="hero-metrics">
-						<div class="metric"><strong>${sourceCount}</strong><span>订阅源</span></div>
-						<div class="metric"><strong>${ruleCount}</strong><span>改名规则</span></div>
-						<div class="metric"><strong>${previewCount}</strong><span>预览节点</span></div>
-					</div>
+		${renderWorkspaceHead("FluxGate · 概览", "聚合控制台", "把多个上游订阅整合成稳定可控的单一入口")}
+		<div class="workspace-body">
+			<section class="hello-card">
+				<div>
+					<span class="eyebrow-dim">你好, ${escapeHtml(username)}</span>
+					<h2>管理订阅源、规则与公开拉取 token</h2>
+					<p class="muted">推荐流程：保存配置 → 预览节点 → 给客户端使用公开链接</p>
 				</div>
-				<div class="hero-side">
-					<section class="panel">
-						<div class="panel-head">
-							<div>
-								<h2>公开订阅</h2>
-								<p>客户端填这个链接即可拉取聚合结果</p>
-							</div>
-							<span class="badge ok">用户隔离已开启</span>
-						</div>
-						<div class="field">
-							<label for="public-url">聚合链接</label>
-							<input id="public-url" value="${escapeAttribute(state.config.publicUrl)}" readonly />
-						</div>
-						<div class="toolbar">
-							<button class="btn btn-primary btn-small" data-action="copy-public-url">复制链接</button>
-							<button class="btn btn-secondary btn-small" data-action="reset-token">重置 token</button>
-							<button class="btn btn-ghost btn-small" data-action="refresh-cache">刷新缓存</button>
-						</div>
-						<p class="footer-note">重置 token 后，旧链接会立即失效。</p>
-					</section>
-					<section class="panel">
-						<div class="panel-head">
-							<div>
-								<h2>发布节奏</h2>
-								<p>推荐流程：保存配置 → 预览节点 → 给客户端使用公开链接</p>
-							</div>
-						</div>
-						<div class="inline-actions">
-							<span class="pill">Base64 输出</span>
-							<span class="pill">单节点别名</span>
-							<span class="pill">Cloudflare Worker</span>
-						</div>
-					</section>
+				<div class="hello-badge">
+					<span class="badge ok">用户隔离已开启</span>
 				</div>
 			</section>
-
-			<section class="grid">
-				<div class="stack">
-					<section class="panel">
-						<div class="panel-head">
-							<div>
-								<h2>订阅源管理</h2>
-								<p>添加多个上游链接，控制优先级、启用状态和单源测试。</p>
-							</div>
-							<div class="toolbar">
-								<button class="btn btn-secondary btn-small" data-action="add-source">新增订阅源</button>
-								<button class="btn btn-primary btn-small" data-action="save-config">保存配置</button>
-							</div>
-						</div>
-						<div class="section-list">
-							${state.config.sources.length ? state.config.sources.map(renderSourceCard).join("") : `
-								<div class="empty-state">
-									还没有订阅源。先添加一个 https:// 开头的订阅地址。
-								</div>
-							`}
-						</div>
-					</section>
-
-					<section class="panel">
-						<div class="panel-head">
-							<div>
-								<h2>聚合规则</h2>
-								<p>控制去重、来源前缀、无名节点保留方式和排序策略。</p>
-							</div>
-						</div>
-						<div class="settings-grid">
-							<div class="field">
-								<label class="toggle-row"><input type="checkbox" id="setting-dedupe" ${state.config.settings.dedupeEnabled ? "checked" : ""} />启用去重</label>
-							</div>
-							<div class="field">
-								<label class="toggle-row"><input type="checkbox" id="setting-prefix-source" ${state.config.settings.prefixSourceName ? "checked" : ""} />节点名前加来源标记</label>
-							</div>
-							<div class="field">
-								<label for="setting-prefix-template">来源前缀模板</label>
-								<input id="setting-prefix-template" value="${escapeAttribute(state.config.settings.sourcePrefixTemplate)}" placeholder="[{{source}}] " />
-							</div>
-							<div class="field">
-								<label for="setting-sort-mode">节点排序</label>
-								<select id="setting-sort-mode">
-									<option value="source-priority" ${state.config.settings.sortMode === "source-priority" ? "selected" : ""}>按来源优先级</option>
-									<option value="name" ${state.config.settings.sortMode === "name" ? "selected" : ""}>按最终名称</option>
-								</select>
-							</div>
-							<div class="field">
-								<label class="toggle-row"><input type="checkbox" id="setting-keep-unnamed" ${state.config.settings.keepUnnamed ? "checked" : ""} />保留无名称节点</label>
-							</div>
-						</div>
-					</section>
-
-					<section class="panel">
-						<div class="panel-head">
-							<div>
-								<h2>批量改名规则</h2>
-								<p>按顺序应用前缀、后缀、替换或正则替换。</p>
-							</div>
-							<button class="btn btn-secondary btn-small" data-action="add-rule">新增规则</button>
-						</div>
-						<div class="section-list">
-							${state.config.renameRules.length ? state.config.renameRules.map(renderRuleCard).join("") : `
-								<div class="empty-state">
-									还没有规则。你可以只用来源前缀，也可以添加批量替换。
-								</div>
-							`}
-						</div>
-					</section>
+			<div class="metrics-row">
+				<div class="metric-card">
+					<small>订阅源</small>
+					<strong>${sourceCount}</strong>
+					<span class="muted">当前配置的上游</span>
 				</div>
+				<div class="metric-card">
+					<small>改名规则</small>
+					<strong>${ruleCount}</strong>
+					<span class="muted">按顺序应用</span>
+				</div>
+				<div class="metric-card">
+					<small>预览节点</small>
+					<strong>${previewCount}</strong>
+					<span class="muted">最新一次聚合</span>
+				</div>
+			</div>
+			<section class="card">
+				<div class="card-head">
+					<h3>公开订阅</h3>
+					<p>客户端填这个链接即可拉取聚合结果</p>
+				</div>
+				<div class="field">
+					<label for="public-url">聚合链接</label>
+					<input id="public-url" value="${escapeAttribute(state.config.publicUrl)}" readonly />
+				</div>
+				<div class="toolbar">
+					<button class="btn btn-primary btn-small" data-action="copy-public-url">复制链接</button>
+					<button class="btn btn-secondary btn-small" data-action="reset-token">重置 token</button>
+					<button class="btn btn-ghost btn-small" data-action="refresh-cache">刷新缓存</button>
+				</div>
+				<p class="footer-note">重置 token 后，旧链接会立即失效。</p>
+			</section>
+		</div>
+	`;
+}
 
-				<div class="stack">
-					<section class="panel">
-						<div class="panel-head">
-							<div>
-								<h2>节点预览</h2>
-								<p>预览聚合效果，并对单个节点持久化别名。</p>
-							</div>
-							<div class="toolbar">
-								<button class="btn btn-primary btn-small" data-action="preview">生成预览</button>
-								<button class="btn btn-secondary btn-small" data-action="copy-raw-output">复制明文</button>
-								<button class="btn btn-ghost btn-small" data-action="copy-b64-output">复制 Base64</button>
-							</div>
+function renderSourcesView() {
+	const actions = `
+		<button class="btn btn-secondary btn-small" data-action="add-source">新增订阅源</button>
+		<button class="btn btn-primary btn-small" data-action="save-config">保存配置</button>
+	`;
+	return `
+		${renderWorkspaceHead("FluxGate · 订阅源", "订阅源管理", "添加多个上游链接，控制优先级、启用状态和单源测试", actions)}
+		<div class="workspace-body">
+			<section class="card">
+				<div class="section-list" data-editor="sources">
+					${state.config.sources.length ? state.config.sources.map(renderSourceCard).join("") : `
+						<div class="empty-state">
+							还没有订阅源。先添加一个 https:// 开头的订阅地址。
 						</div>
-						${state.preview ? renderPreviewPanel() : `<div class="empty-state">预览尚未生成。建议在保存配置后执行一次预览。</div>`}
-					</section>
-
-					<section class="panel">
-						<div class="panel-head">
-							<div>
-								<h2>账号安全</h2>
-								<p>修改密码、退出登录和管理公开订阅入口。</p>
-							</div>
-						</div>
-						<form data-form="password" class="stack">
-							<div class="field">
-								<label for="current-password">当前密码</label>
-								<input id="current-password" name="currentPassword" type="password" autocomplete="current-password" required />
-							</div>
-							<div class="field">
-								<label for="new-password">新密码</label>
-								<input id="new-password" name="newPassword" type="password" autocomplete="new-password" required />
-							</div>
-							<div class="toolbar">
-								<button class="btn btn-primary btn-small" type="submit">更新密码</button>
-								<button class="btn btn-danger btn-small" type="button" data-action="logout">退出登录</button>
-							</div>
-						</form>
-					</section>
+					`}
 				</div>
 			</section>
 		</div>
-		${renderToasts()}
+	`;
+}
+
+function renderRulesView() {
+	const actions = `
+		<button class="btn btn-secondary btn-small" data-action="add-rule">新增规则</button>
+		<button class="btn btn-primary btn-small" data-action="save-config">保存配置</button>
+	`;
+	return `
+		${renderWorkspaceHead("FluxGate · 规则", "聚合规则", "去重策略、来源前缀、排序与批量改名", actions)}
+		<div class="workspace-body">
+			<section class="card" data-editor="settings">
+				<div class="card-head">
+					<h3>全局设置</h3>
+					<p>控制去重、来源前缀、无名节点保留方式和排序策略</p>
+				</div>
+				<div class="settings-grid">
+					<div class="field">
+						<label class="toggle-row"><input type="checkbox" id="setting-dedupe" ${state.config.settings.dedupeEnabled ? "checked" : ""} />启用去重</label>
+					</div>
+					<div class="field">
+						<label class="toggle-row"><input type="checkbox" id="setting-prefix-source" ${state.config.settings.prefixSourceName ? "checked" : ""} />节点名前加来源标记</label>
+					</div>
+					<div class="field">
+						<label for="setting-prefix-template">来源前缀模板</label>
+						<input id="setting-prefix-template" value="${escapeAttribute(state.config.settings.sourcePrefixTemplate)}" placeholder="[{{source}}] " />
+					</div>
+					<div class="field">
+						<label for="setting-sort-mode">节点排序</label>
+						<select id="setting-sort-mode">
+							<option value="source-priority" ${state.config.settings.sortMode === "source-priority" ? "selected" : ""}>按来源优先级</option>
+							<option value="name" ${state.config.settings.sortMode === "name" ? "selected" : ""}>按最终名称</option>
+						</select>
+					</div>
+					<div class="field">
+						<label class="toggle-row"><input type="checkbox" id="setting-keep-unnamed" ${state.config.settings.keepUnnamed ? "checked" : ""} />保留无名称节点</label>
+					</div>
+				</div>
+			</section>
+			<section class="card">
+				<div class="card-head">
+					<h3>批量改名规则</h3>
+					<p>按顺序应用前缀、后缀、替换或正则替换</p>
+				</div>
+				<div class="section-list" data-editor="rules">
+					${state.config.renameRules.length ? state.config.renameRules.map(renderRuleCard).join("") : `
+						<div class="empty-state">
+							还没有规则。你可以只用来源前缀，也可以添加批量替换。
+						</div>
+					`}
+				</div>
+			</section>
+		</div>
+	`;
+}
+
+function renderPreviewView() {
+	const actions = `
+		<button class="btn btn-primary btn-small" data-action="preview">生成预览</button>
+		<button class="btn btn-secondary btn-small" data-action="copy-raw-output">复制明文</button>
+		<button class="btn btn-ghost btn-small" data-action="copy-b64-output">复制 Base64</button>
+	`;
+	return `
+		${renderWorkspaceHead("FluxGate · 预览", "节点预览", "预览聚合效果，并对单个节点持久化别名", actions)}
+		<div class="workspace-body">
+			${state.preview ? `<section class="card">${renderPreviewPanel()}</section>` : `<div class="empty-state">预览尚未生成。建议在保存配置后执行一次预览。</div>`}
+		</div>
+	`;
+}
+
+function renderAccountView() {
+	return `
+		${renderWorkspaceHead("FluxGate · 账号", "账号安全", "修改密码并管理公开订阅入口")}
+		<div class="workspace-body">
+			<section class="card">
+				<div class="card-head">
+					<h3>修改密码</h3>
+					<p>使用新密码登录，请妥善保管</p>
+				</div>
+				<form data-form="password" class="stack">
+					<div class="field">
+						<label for="current-password">当前密码</label>
+						<input id="current-password" name="currentPassword" type="password" autocomplete="current-password" placeholder="请输入当前密码" required />
+					</div>
+					<div class="field">
+						<label for="new-password">新密码</label>
+						<input id="new-password" name="newPassword" type="password" autocomplete="new-password" placeholder="请输入新密码" required />
+					</div>
+					<div class="toolbar">
+						<button class="btn btn-primary btn-small" type="submit">更新密码</button>
+						<button class="btn btn-danger btn-small" type="button" data-action="logout">退出登录</button>
+					</div>
+				</form>
+			</section>
+			<section class="card">
+				<div class="card-head">
+					<h3>公开订阅 token</h3>
+					<p>重置或刷新公开订阅缓存，旧链接会立即失效</p>
+				</div>
+				<div class="field">
+					<label for="account-public-url">当前聚合链接</label>
+					<input id="account-public-url" value="${escapeAttribute(state.config.publicUrl)}" readonly />
+				</div>
+				<div class="toolbar">
+					<button class="btn btn-secondary btn-small" data-action="copy-public-url">复制链接</button>
+					<button class="btn btn-secondary btn-small" data-action="reset-token">重置 token</button>
+					<button class="btn btn-ghost btn-small" data-action="refresh-cache">刷新缓存</button>
+				</div>
+			</section>
+		</div>
 	`;
 }
 
@@ -636,34 +736,41 @@ function syncDraftConfig() {
 		return;
 	}
 
-	const sources = [...document.querySelectorAll("[data-source-id]")].map((card) => ({
-		id: card.dataset.sourceId,
-		name: card.querySelector('[data-source-field="name"]').value,
-		url: card.querySelector('[data-source-field="url"]').value,
-		enabled: card.querySelector('[data-source-field="enabled"]').checked,
-		priority: Number(card.querySelector('[data-source-field="priority"]').value || 0),
-		notes: card.querySelector('[data-source-field="notes"]').value,
-	}));
+	const sourcesEditor = document.querySelector('[data-editor="sources"]');
+	if (sourcesEditor) {
+		state.config.sources = [...sourcesEditor.querySelectorAll("[data-source-id]")].map((card) => ({
+			id: card.dataset.sourceId,
+			name: card.querySelector('[data-source-field="name"]').value,
+			url: card.querySelector('[data-source-field="url"]').value,
+			enabled: card.querySelector('[data-source-field="enabled"]').checked,
+			priority: Number(card.querySelector('[data-source-field="priority"]').value || 0),
+			notes: card.querySelector('[data-source-field="notes"]').value,
+		}));
+	}
 
-	const renameRules = [...document.querySelectorAll("[data-rule-id]")].map((card) => ({
-		id: card.dataset.ruleId,
-		type: card.querySelector('[data-rule-field="type"]').value,
-		enabled: card.querySelector('[data-rule-field="enabled"]').checked,
-		match: card.querySelector('[data-rule-field="match"]').value,
-		replace: card.querySelector('[data-rule-field="replace"]').value,
-		value: card.querySelector('[data-rule-field="value"]').value,
-		order: Number(card.querySelector('[data-rule-field="order"]').value || 0),
-	}));
+	const rulesEditor = document.querySelector('[data-editor="rules"]');
+	if (rulesEditor) {
+		state.config.renameRules = [...rulesEditor.querySelectorAll("[data-rule-id]")].map((card) => ({
+			id: card.dataset.ruleId,
+			type: card.querySelector('[data-rule-field="type"]').value,
+			enabled: card.querySelector('[data-rule-field="enabled"]').checked,
+			match: card.querySelector('[data-rule-field="match"]').value,
+			replace: card.querySelector('[data-rule-field="replace"]').value,
+			value: card.querySelector('[data-rule-field="value"]').value,
+			order: Number(card.querySelector('[data-rule-field="order"]').value || 0),
+		}));
+	}
 
-	state.config.sources = sources;
-	state.config.renameRules = renameRules;
-	state.config.settings = {
-		dedupeEnabled: document.getElementById("setting-dedupe").checked,
-		prefixSourceName: document.getElementById("setting-prefix-source").checked,
-		sourcePrefixTemplate: document.getElementById("setting-prefix-template").value,
-		keepUnnamed: document.getElementById("setting-keep-unnamed").checked,
-		sortMode: document.getElementById("setting-sort-mode").value,
-	};
+	const settingsEditor = document.querySelector('[data-editor="settings"]');
+	if (settingsEditor) {
+		state.config.settings = {
+			dedupeEnabled: document.getElementById("setting-dedupe").checked,
+			prefixSourceName: document.getElementById("setting-prefix-source").checked,
+			sourcePrefixTemplate: document.getElementById("setting-prefix-template").value,
+			keepUnnamed: document.getElementById("setting-keep-unnamed").checked,
+			sortMode: document.getElementById("setting-sort-mode").value,
+		};
+	}
 }
 
 async function saveConfig() {
