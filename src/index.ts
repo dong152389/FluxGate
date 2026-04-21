@@ -4,14 +4,17 @@ import {
 	createUser,
 	deleteSessionByHash,
 	findSessionUser,
+	findUserByEmail,
 	findUserByUsername,
 	getConfigResponse,
 	getPublicSubscriptionContext,
 	listAliases,
 	rotatePublicToken,
 	saveAlias,
+	saveAliasesBatch,
 	saveConfig,
 	touchSession,
+	updateUserEmail,
 } from "./lib/data";
 import { apiError, getCookie, json, makeCookie, readJson } from "./lib/http";
 import {
@@ -75,6 +78,10 @@ async function routeRequest(
 		return handleChangePassword(request, env);
 	}
 
+	if (request.method === "POST" && url.pathname === "/api/auth/email") {
+		return handleUpdateEmail(request, env);
+	}
+
 	if (request.method === "POST" && url.pathname === "/api/auth/reset-public-token") {
 		return handleResetPublicToken(request, env);
 	}
@@ -99,6 +106,10 @@ async function routeRequest(
 
 	if (request.method === "POST" && url.pathname === "/api/rename-node") {
 		return handleRenameNode(request, env);
+	}
+
+	if (request.method === "POST" && url.pathname === "/api/rename-nodes") {
+		return handleRenameNodes(request, env);
 	}
 
 	if (request.method === "POST" && url.pathname === "/api/refresh") {
@@ -139,18 +150,21 @@ async function handleRegister(request: Request, env: AppEnv): Promise<Response> 
 }
 
 async function handleLogin(request: Request, env: AppEnv): Promise<Response> {
-	const body = await readJson<{ username?: string; password?: string }>(request);
-	const username = normalizeUsername(body.username);
+	const body = await readJson<{ identifier?: string; username?: string; password?: string }>(request);
+	const identifier = normalizeLoginIdentifier(body.identifier ?? body.username);
 	const password = normalizePassword(body.password);
 
-	const user = await findUserByUsername(env.DB, username);
+	const user = identifier.kind === "email"
+		? await findUserByEmail(env.DB, identifier.value)
+		: await findUserByUsername(env.DB, identifier.value);
+
 	if (!user || user.status !== "active") {
-		return apiError(401, "用户名或密码错误");
+		return apiError(401, "账号或密码错误");
 	}
 
 	const matches = await verifyPassword(password, user.password_hash, user.password_salt);
 	if (!matches) {
-		return apiError(401, "用户名或密码错误");
+		return apiError(401, "账号或密码错误");
 	}
 
 	return makeSessionResponse(request, env, {
@@ -216,6 +230,46 @@ async function handleChangePassword(request: Request, env: AppEnv): Promise<Resp
 		.run();
 
 	return json({ ok: true });
+}
+
+async function handleUpdateEmail(request: Request, env: AppEnv): Promise<Response> {
+	const auth = await requireAuthRecord(request, env);
+	const body = await readJson<{ email?: string; currentPassword?: string }>(request);
+	const rawEmail = (body.email ?? "").trim();
+	const email = rawEmail ? normalizeEmail(rawEmail) : null;
+	const currentPassword = normalizePassword(body.currentPassword);
+
+	const user = await findUserByUsername(env.DB, auth.user.username);
+	if (!user) {
+		return apiError(404, "用户不存在");
+	}
+
+	const matches = await verifyPassword(
+		currentPassword,
+		user.password_hash,
+		user.password_salt,
+	);
+	if (!matches) {
+		return apiError(401, "当前密码不正确");
+	}
+
+	if (email) {
+		const existing = await findUserByEmail(env.DB, email);
+		if (existing && existing.id !== user.id) {
+			return apiError(409, "该邮箱已被其他账号绑定");
+		}
+	}
+
+	await updateUserEmail(env.DB, user.id, email);
+
+	return json({
+		ok: true,
+		user: {
+			id: user.id,
+			username: user.username,
+			email,
+		},
+	});
 }
 
 async function handleResetPublicToken(request: Request, env: AppEnv): Promise<Response> {
@@ -288,6 +342,43 @@ async function handleRenameNode(request: Request, env: AppEnv): Promise<Response
 	await saveAlias(env.DB, auth.user.id, fingerprint, alias);
 	await bumpCacheVersion(env.DB, auth.user.id);
 	return json({ ok: true });
+}
+
+async function handleRenameNodes(request: Request, env: AppEnv): Promise<Response> {
+	const auth = await requireAuthRecord(request, env);
+	const body = await readJson<{ updates?: Array<{ fingerprint?: string; alias?: string }> }>(request);
+	const rawUpdates = Array.isArray(body.updates) ? body.updates : [];
+
+	if (rawUpdates.length > 2000) {
+		return apiError(400, "批量保存条目过多");
+	}
+
+	const seen = new Set<string>();
+	const normalized: Array<{ fingerprint: string; alias: string }> = [];
+	for (const entry of rawUpdates) {
+		const fingerprint = entry?.fingerprint?.trim();
+		if (!fingerprint) {
+			return apiError(400, "节点指纹不能为空");
+		}
+		if (seen.has(fingerprint)) {
+			continue;
+		}
+		seen.add(fingerprint);
+
+		const alias = (entry?.alias ?? "").trim();
+		if (alias.length > 120) {
+			return apiError(400, "别名长度不能超过 120 个字符");
+		}
+		normalized.push({ fingerprint, alias });
+	}
+
+	if (normalized.length === 0) {
+		return json({ ok: true, count: 0 });
+	}
+
+	await saveAliasesBatch(env.DB, auth.user.id, normalized);
+	await bumpCacheVersion(env.DB, auth.user.id);
+	return json({ ok: true, count: normalized.length });
 }
 
 async function handleRefresh(request: Request, env: AppEnv): Promise<Response> {
@@ -515,6 +606,30 @@ function normalizeOptionalEmail(value: string | undefined): string | null {
 		throw new HttpError(400, "邮箱格式不正确");
 	}
 	return email.slice(0, 120);
+}
+
+function normalizeEmail(value: string | undefined): string {
+	const email = (value || "").trim();
+	if (!email) {
+		throw new HttpError(400, "邮箱不能为空");
+	}
+	if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+		throw new HttpError(400, "邮箱格式不正确");
+	}
+	return email.slice(0, 120);
+}
+
+function normalizeLoginIdentifier(
+	value: string | undefined,
+): { kind: "email"; value: string } | { kind: "username"; value: string } {
+	const raw = (value || "").trim();
+	if (!raw) {
+		throw new HttpError(400, "请输入账号");
+	}
+	if (raw.includes("@")) {
+		return { kind: "email", value: normalizeEmail(raw) };
+	}
+	return { kind: "username", value: normalizeUsername(raw) };
 }
 
 function normalizePassword(value: string | undefined): string {

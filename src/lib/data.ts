@@ -35,6 +35,29 @@ export async function findUserByUsername(
 	);
 }
 
+export async function findUserByEmail(
+	db: D1Database,
+	email: string,
+): Promise<UserRow | null> {
+	return (
+		(await db
+			.prepare("SELECT * FROM users WHERE email = ?")
+			.bind(email)
+			.first<UserRow>()) ?? null
+	);
+}
+
+export async function updateUserEmail(
+	db: D1Database,
+	userId: string,
+	email: string | null,
+): Promise<void> {
+	await db
+		.prepare("UPDATE users SET email = ?, updated_at = ? WHERE id = ?")
+		.bind(email, nowIso(), userId)
+		.run();
+}
+
 export async function findUserById(
 	db: D1Database,
 	userId: string,
@@ -355,6 +378,35 @@ export async function saveAlias(
 		)
 		.bind(userId, fingerprint, alias, nowIso())
 		.run();
+}
+
+export async function saveAliasesBatch(
+	db: D1Database,
+	userId: string,
+	updates: Array<{ fingerprint: string; alias: string }>,
+): Promise<void> {
+	if (updates.length === 0) {
+		return;
+	}
+
+	const now = nowIso();
+	const statements = updates.map(({ fingerprint, alias }) =>
+		alias
+			? db
+					.prepare(
+						`INSERT INTO node_aliases (user_id, fingerprint, alias, updated_at)
+						 VALUES (?, ?, ?, ?)
+						 ON CONFLICT(user_id, fingerprint) DO UPDATE
+						 SET alias = excluded.alias,
+						     updated_at = excluded.updated_at`,
+					)
+					.bind(userId, fingerprint, alias, now)
+			: db
+					.prepare("DELETE FROM node_aliases WHERE user_id = ? AND fingerprint = ?")
+					.bind(userId, fingerprint),
+	);
+
+	await db.batch(statements);
 }
 
 export async function bumpCacheVersion(

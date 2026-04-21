@@ -56,6 +56,7 @@ document.addEventListener("click", async (event) => {
 		}
 
 		syncDraftConfig();
+		syncDraftPreview();
 
 		if (action === "switch-view") {
 			state.activeView = button.dataset.view || "overview";
@@ -170,6 +171,67 @@ document.addEventListener("click", async (event) => {
 			await withBusy(button, "保存中...", async () => {
 				await saveAlias(button.dataset.fingerprint);
 			});
+			return;
+		}
+
+		if (action === "save-all-aliases") {
+			await withBusy(button, "保存中...", async () => {
+				await saveAllAliases();
+			});
+			return;
+		}
+
+		if (action === "apply-batch") {
+			applyBatchTransform();
+			return;
+		}
+
+		if (action === "select-all-nodes") {
+			if (state.preview?.nodes?.length) {
+				state.preview.nodes.forEach((node) => {
+					node._selected = true;
+				});
+				render();
+			}
+			return;
+		}
+
+		if (action === "clear-node-selection") {
+			if (state.preview?.nodes?.length) {
+				state.preview.nodes.forEach((node) => {
+					node._selected = false;
+				});
+				render();
+			}
+			return;
+		}
+
+		if (action === "toggle-select-all-nodes") {
+			if (state.preview?.nodes?.length) {
+				const shouldSelect = button.checked;
+				state.preview.nodes.forEach((node) => {
+					node._selected = shouldSelect;
+				});
+				render();
+			}
+			return;
+		}
+
+		if (action === "unbind-email") {
+			const form = button.closest('form[data-form="email"]');
+			if (!form) {
+				return;
+			}
+			const emailInput = form.querySelector('input[name="email"]');
+			if (emailInput) {
+				emailInput.value = "";
+			}
+			if (typeof form.requestSubmit === "function") {
+				form.requestSubmit();
+			} else {
+				form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+			}
+			return;
 		}
 	} catch (error) {
 		pushNotice(error.message || "操作失败", true);
@@ -197,6 +259,13 @@ document.addEventListener("submit", async (event) => {
 		if (form.dataset.form === "password") {
 			await withBusy(submitter, "更新中...", async () => {
 				await submitPasswordChange(form);
+			});
+			return;
+		}
+
+		if (form.dataset.form === "email") {
+			await withBusy(submitter, "保存中...", async () => {
+				await submitEmailBinding(form);
 			});
 		}
 	} catch (error) {
@@ -238,6 +307,7 @@ function renderLoading() {
 }
 
 function renderAuth() {
+	const isRegister = state.authMode === "register";
 	return `
 		<div class="auth-wrap">
 			<div class="auth-card">
@@ -253,27 +323,30 @@ function renderAuth() {
 				</section>
 				<section class="auth-panel">
 					<div class="tabs">
-						<button class="tab ${state.authMode === "login" ? "active" : ""}" data-action="switch-auth" data-mode="login">登录</button>
-						<button class="tab ${state.authMode === "register" ? "active" : ""}" data-action="switch-auth" data-mode="register">注册</button>
+						<button class="tab ${!isRegister ? "active" : ""}" data-action="switch-auth" data-mode="login">登录</button>
+						<button class="tab ${isRegister ? "active" : ""}" data-action="switch-auth" data-mode="register">注册</button>
 					</div>
 					<form data-form="auth" data-mode="${state.authMode}" class="stack">
-						<div class="field">
-							<label for="auth-username">用户名</label>
-							<input id="auth-username" name="username" placeholder="请输入账号" autocomplete="username" required />
-						</div>
-						${state.authMode === "register"
+						${isRegister
 							? `<div class="field">
+									<label for="auth-username">用户名</label>
+									<input id="auth-username" name="username" placeholder="3-32 位字母/数字/._-" autocomplete="username" required />
+								</div>
+								<div class="field">
 									<label for="auth-email">邮箱（可选）</label>
-									<input id="auth-email" name="email" placeholder="请输入邮箱" autocomplete="email" />
+									<input id="auth-email" name="email" type="email" placeholder="绑定后可用邮箱登录" autocomplete="email" />
 								</div>`
-							: ""}
+							: `<div class="field">
+									<label for="auth-identifier">账号</label>
+									<input id="auth-identifier" name="identifier" placeholder="用户名或邮箱" autocomplete="username" required />
+								</div>`}
 						<div class="field">
 							<label for="auth-password">密码</label>
-							<input id="auth-password" name="password" type="password" placeholder="请输入密码" autocomplete="${state.authMode === "register" ? "new-password" : "current-password"}" required />
+							<input id="auth-password" name="password" type="password" placeholder="请输入密码" autocomplete="${isRegister ? "new-password" : "current-password"}" required />
 						</div>
-						<button class="btn btn-primary" type="submit">${state.authMode === "register" ? "创建账号并进入控制台" : "登录控制台"}</button>
+						<button class="btn btn-primary" type="submit">${isRegister ? "创建账号并进入控制台" : "登录控制台"}</button>
 					</form>
-					<p class="footer-note">首版默认使用用户名密码登录，公开订阅链接与登录态分离。</p>
+					<p class="footer-note">用户名或邮箱均可登录，公开订阅链接与登录态分离。</p>
 				</section>
 			</div>
 		</div>
@@ -501,9 +574,31 @@ function renderPreviewView() {
 }
 
 function renderAccountView() {
+	const boundEmail = state.user?.email || "";
 	return `
-		${renderWorkspaceHead("FluxGate · 账号", "账号安全", "修改密码并管理公开订阅入口")}
+		${renderWorkspaceHead("FluxGate · 账号", "账号安全", "修改密码、绑定邮箱并管理公开订阅入口")}
 		<div class="workspace-body">
+			<section class="card">
+				<div class="card-head">
+					<h3>邮箱登录</h3>
+					<p>${boundEmail ? `当前已绑定：<strong>${escapeHtml(boundEmail)}</strong>` : "尚未绑定邮箱，绑定后可用邮箱登录"}</p>
+				</div>
+				<form data-form="email" class="stack">
+					<div class="field">
+						<label for="bind-email">邮箱</label>
+						<input id="bind-email" name="email" type="email" autocomplete="email" placeholder="name@example.com" value="${escapeAttribute(boundEmail)}" />
+					</div>
+					<div class="field">
+						<label for="bind-email-password">当前密码</label>
+						<input id="bind-email-password" name="currentPassword" type="password" autocomplete="current-password" placeholder="验证身份所用" required />
+					</div>
+					<div class="toolbar">
+						<button class="btn btn-primary btn-small" type="submit">${boundEmail ? "更新邮箱" : "绑定邮箱"}</button>
+						${boundEmail ? `<button class="btn btn-ghost btn-small" type="button" data-action="unbind-email">解除绑定</button>` : ""}
+					</div>
+					<p class="footer-note">留空并点击更新可清除绑定。</p>
+				</form>
+			</section>
 			<section class="card">
 				<div class="card-head">
 					<h3>修改密码</h3>
@@ -638,6 +733,10 @@ function renderRuleCard(rule, index) {
 }
 
 function renderPreviewPanel() {
+	const batch = state.previewBatch || { type: "prefix", match: "", value: "" };
+	const total = state.preview.nodes.length;
+	const selectedCount = state.preview.nodes.filter((node) => node._selected).length;
+	const allSelected = total > 0 && selectedCount === total;
 	return `
 		<div class="stack">
 			<div class="inline-actions">
@@ -659,10 +758,40 @@ function renderPreviewPanel() {
 				`).join("")}
 			</div>
 			<div class="code-block">${escapeHtml(state.preview.rawText || "当前没有可输出的节点")}</div>
+			<div class="preview-batch-toolbar" data-editor="preview-batch">
+				<div class="preview-batch-info">
+					<strong>已选 ${selectedCount}</strong>
+					<span class="muted">/ ${total}</span>
+				</div>
+				<div class="field">
+					<label>操作</label>
+					<select data-preview-batch-type>
+						<option value="prefix" ${batch.type === "prefix" ? "selected" : ""}>加前缀</option>
+						<option value="suffix" ${batch.type === "suffix" ? "selected" : ""}>加后缀</option>
+						<option value="replace" ${batch.type === "replace" ? "selected" : ""}>查找替换</option>
+						<option value="clear" ${batch.type === "clear" ? "selected" : ""}>清空</option>
+					</select>
+				</div>
+				<div class="field" data-size="sm">
+					<label>查找</label>
+					<input data-preview-batch-match value="${escapeAttribute(batch.match || "")}" placeholder="仅替换用" />
+				</div>
+				<div class="field">
+					<label>值</label>
+					<input data-preview-batch-value value="${escapeAttribute(batch.value || "")}" placeholder="前缀 / 后缀 / 替换文本" />
+				</div>
+				<div class="inline-actions preview-batch-actions">
+					<button class="btn btn-ghost btn-small" data-action="select-all-nodes">全选</button>
+					<button class="btn btn-ghost btn-small" data-action="clear-node-selection">清空</button>
+					<button class="btn btn-secondary btn-small" data-action="apply-batch">应用</button>
+					<button class="btn btn-primary btn-small" data-action="save-all-aliases">批量保存</button>
+				</div>
+			</div>
 			<div style="overflow-x: auto;">
 				<table class="preview-table">
 					<thead>
 						<tr>
+							<th><input type="checkbox" data-action="toggle-select-all-nodes" ${allSelected ? "checked" : ""} aria-label="全选" /></th>
 							<th>来源</th>
 							<th>协议</th>
 							<th>原始名称</th>
@@ -673,6 +802,7 @@ function renderPreviewPanel() {
 					<tbody>
 						${state.preview.nodes.map((node) => `
 							<tr data-node-fingerprint="${escapeAttribute(node.fingerprint)}">
+								<td><input type="checkbox" data-preview-select ${node._selected ? "checked" : ""} aria-label="选择 ${escapeAttribute(node.finalName)}" /></td>
 								<td>${escapeHtml(node.sourceName)}</td>
 								<td>${escapeHtml(node.protocol)}</td>
 								<td>${escapeHtml(node.originalName)}</td>
@@ -695,14 +825,18 @@ function renderPreviewPanel() {
 async function submitAuth(form) {
 	const formData = new FormData(form);
 	const mode = form.dataset.mode || "login";
-	const payload = {
-		username: `${formData.get("username") || ""}`.trim(),
-		password: `${formData.get("password") || ""}`,
-	};
+	const password = `${formData.get("password") || ""}`;
 
-	if (mode === "register") {
-		payload.email = `${formData.get("email") || ""}`.trim();
-	}
+	const payload = mode === "register"
+		? {
+			username: `${formData.get("username") || ""}`.trim(),
+			email: `${formData.get("email") || ""}`.trim(),
+			password,
+		}
+		: {
+			identifier: `${formData.get("identifier") || ""}`.trim(),
+			password,
+		};
 
 	const response = await api(`/api/auth/${mode === "register" ? "register" : "login"}`, {
 		method: "POST",
@@ -728,6 +862,24 @@ async function submitPasswordChange(form) {
 	});
 	form.reset();
 	pushNotice("密码已更新");
+	render();
+}
+
+async function submitEmailBinding(form) {
+	const formData = new FormData(form);
+	const email = `${formData.get("email") || ""}`.trim();
+	const currentPassword = `${formData.get("currentPassword") || ""}`;
+
+	const response = await api("/api/auth/email", {
+		method: "POST",
+		body: JSON.stringify({ email, currentPassword }),
+	});
+
+	if (state.user) {
+		state.user.email = response.user?.email ?? null;
+	}
+	form.reset();
+	pushNotice(email ? "邮箱已绑定" : "邮箱已解除绑定");
 	render();
 }
 
@@ -769,6 +921,41 @@ function syncDraftConfig() {
 			sourcePrefixTemplate: document.getElementById("setting-prefix-template").value,
 			keepUnnamed: document.getElementById("setting-keep-unnamed").checked,
 			sortMode: document.getElementById("setting-sort-mode").value,
+		};
+	}
+}
+
+function syncDraftPreview() {
+	if (!state.preview || !Array.isArray(state.preview.nodes)) {
+		return;
+	}
+
+	const byFingerprint = new Map(state.preview.nodes.map((node) => [node.fingerprint, node]));
+	document.querySelectorAll("[data-node-fingerprint]").forEach((row) => {
+		const fingerprint = row.getAttribute("data-node-fingerprint");
+		const node = byFingerprint.get(fingerprint);
+		if (!node) {
+			return;
+		}
+		const aliasInput = row.querySelector("[data-alias-input]");
+		if (aliasInput) {
+			node.alias = aliasInput.value;
+		}
+		const checkbox = row.querySelector("[data-preview-select]");
+		if (checkbox) {
+			node._selected = checkbox.checked;
+		}
+	});
+
+	const toolbar = document.querySelector('[data-editor="preview-batch"]');
+	if (toolbar) {
+		const typeSelect = toolbar.querySelector("[data-preview-batch-type]");
+		const matchInput = toolbar.querySelector("[data-preview-batch-match]");
+		const valueInput = toolbar.querySelector("[data-preview-batch-value]");
+		state.previewBatch = {
+			type: typeSelect?.value || "prefix",
+			match: matchInput?.value || "",
+			value: valueInput?.value || "",
 		};
 	}
 }
@@ -820,13 +1007,95 @@ async function saveAlias(fingerprint) {
 		return;
 	}
 
-	const alias = row.querySelector("[data-alias-input]").value;
+	const rawAlias = row.querySelector("[data-alias-input]").value;
+	const alias = rawAlias.trim();
 	await api("/api/rename-node", {
 		method: "POST",
 		body: JSON.stringify({ fingerprint, alias }),
 	});
-	pushNotice("节点别名已保存，预览已重新生成");
-	await loadPreview();
+
+	const node = state.preview?.nodes.find((item) => item.fingerprint === fingerprint);
+	if (node) {
+		node.alias = alias;
+		if (alias) {
+			node.finalName = alias;
+		}
+	}
+	pushNotice("节点别名已保存");
+}
+
+async function saveAllAliases() {
+	if (!state.preview || !state.preview.nodes.length) {
+		pushNotice("当前没有可保存的节点", false, "warn");
+		return;
+	}
+
+	const updates = state.preview.nodes.map((node) => ({
+		fingerprint: node.fingerprint,
+		alias: (node.alias ?? "").trim(),
+	}));
+
+	const result = await api("/api/rename-nodes", {
+		method: "POST",
+		body: JSON.stringify({ updates }),
+	});
+
+	state.preview.nodes.forEach((node) => {
+		const trimmed = (node.alias ?? "").trim();
+		node.alias = trimmed;
+		if (trimmed) {
+			node.finalName = trimmed;
+		}
+	});
+
+	pushNotice(`已批量保存 ${result?.count ?? updates.length} 个节点别名`);
+}
+
+function applyBatchTransform() {
+	if (!state.preview || !state.preview.nodes.length) {
+		pushNotice("请先生成预览", false, "warn");
+		return;
+	}
+
+	const batch = state.previewBatch || { type: "prefix", match: "", value: "" };
+	const targets = state.preview.nodes.filter((node) => node._selected);
+	if (!targets.length) {
+		pushNotice("请先勾选至少一个节点", false, "warn");
+		return;
+	}
+
+	if (batch.type === "replace" && !batch.match) {
+		pushNotice("查找替换需要填写查找内容", false, "warn");
+		return;
+	}
+
+	let mutated = 0;
+	targets.forEach((node) => {
+		const current = (node.alias ?? "");
+		const base = current || node.finalName || "";
+		let next = current;
+
+		if (batch.type === "prefix") {
+			next = (batch.value || "") + base;
+		} else if (batch.type === "suffix") {
+			next = base + (batch.value || "");
+		} else if (batch.type === "replace") {
+			next = base.split(batch.match).join(batch.value || "");
+		} else if (batch.type === "clear") {
+			next = "";
+		}
+
+		if (next !== current) {
+			node.alias = next;
+			mutated += 1;
+		}
+	});
+
+	if (mutated) {
+		pushNotice(`已更新 ${mutated} 个节点别名（待保存）`);
+	} else {
+		pushNotice("没有节点发生变化", false, "warn");
+	}
 }
 
 function blankSource() {
