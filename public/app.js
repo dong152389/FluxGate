@@ -96,7 +96,14 @@ document.addEventListener("click", async (event) => {
 		}
 
 		if (action === "copy-public-url") {
-			await copyText(state.config.publicUrl, "聚合链接已复制");
+			const value = state.config.publicUrls?.v2ray || state.config.publicUrl;
+			await copyText(value, "v2ray 订阅链接已复制");
+			return;
+		}
+
+		if (action === "copy-clash-url") {
+			const value = state.config.publicUrls?.clash || `${state.config.publicUrl}?format=clash`;
+			await copyText(value, "Clash/Mihomo 订阅链接已复制");
 			return;
 		}
 
@@ -136,6 +143,12 @@ document.addEventListener("click", async (event) => {
 			await withBusy(button, "刷新中...", async () => {
 				const result = await api("/api/refresh", { method: "POST" });
 				state.config.publicUrl = result.publicUrl;
+				state.config.publicUrls = {
+					...(state.config.publicUrls || {}),
+					v2ray: result.publicUrl,
+					clash: `${result.publicUrl}?format=clash`,
+					raw: `${result.publicUrl}?raw=1`,
+				};
 				pushNotice("缓存版本已刷新，新的拉取会重新聚合");
 				render();
 			});
@@ -147,6 +160,12 @@ document.addEventListener("click", async (event) => {
 				const result = await api("/api/auth/reset-public-token", { method: "POST" });
 				state.config.publicToken = result.publicToken;
 				state.config.publicUrl = result.publicUrl;
+				state.config.publicUrls = {
+					...(state.config.publicUrls || {}),
+					v2ray: result.publicUrl,
+					clash: `${result.publicUrl}?format=clash`,
+					raw: `${result.publicUrl}?raw=1`,
+				};
 				pushNotice("公开订阅 token 已重置，旧链接已失效");
 				render();
 			});
@@ -435,6 +454,7 @@ function renderOverview() {
 	const ruleCount = state.config.renameRules.length;
 	const previewCount = state.preview?.nodeCount ?? 0;
 	const username = state.user?.username || "";
+	const publicUrls = resolvePublicUrls(state.config);
 	return `
 		${renderWorkspaceHead("FluxGate · 概览", "聚合控制台", "把多个上游订阅整合成稳定可控的单一入口")}
 		<div class="workspace-body">
@@ -471,11 +491,16 @@ function renderOverview() {
 					<p>客户端填这个链接即可拉取聚合结果</p>
 				</div>
 				<div class="field">
-					<label for="public-url">聚合链接</label>
-					<input id="public-url" value="${escapeAttribute(state.config.publicUrl)}" readonly />
+					<label for="public-url">v2ray 订阅链接</label>
+					<input id="public-url" value="${escapeAttribute(publicUrls.v2ray)}" readonly />
+				</div>
+				<div class="field">
+					<label for="public-url-clash">Clash / Mihomo 订阅链接</label>
+					<input id="public-url-clash" value="${escapeAttribute(publicUrls.clash)}" readonly />
 				</div>
 				<div class="toolbar">
-					<button class="btn btn-primary btn-small" data-action="copy-public-url">复制链接</button>
+					<button class="btn btn-primary btn-small" data-action="copy-public-url">复制 v2ray 链接</button>
+					<button class="btn btn-secondary btn-small" data-action="copy-clash-url">复制 Clash 链接</button>
 					<button class="btn btn-secondary btn-small" data-action="reset-token">重置 token</button>
 					<button class="btn btn-ghost btn-small" data-action="refresh-cache">刷新缓存</button>
 				</div>
@@ -575,6 +600,7 @@ function renderPreviewView() {
 
 function renderAccountView() {
 	const boundEmail = state.user?.email || "";
+	const publicUrls = resolvePublicUrls(state.config);
 	return `
 		${renderWorkspaceHead("FluxGate · 账号", "账号安全", "修改密码、绑定邮箱并管理公开订阅入口")}
 		<div class="workspace-body">
@@ -625,11 +651,16 @@ function renderAccountView() {
 					<p>重置或刷新公开订阅缓存，旧链接会立即失效</p>
 				</div>
 				<div class="field">
-					<label for="account-public-url">当前聚合链接</label>
-					<input id="account-public-url" value="${escapeAttribute(state.config.publicUrl)}" readonly />
+					<label for="account-public-url">当前 v2ray 订阅链接</label>
+					<input id="account-public-url" value="${escapeAttribute(publicUrls.v2ray)}" readonly />
+				</div>
+				<div class="field">
+					<label for="account-public-url-clash">当前 Clash / Mihomo 订阅链接</label>
+					<input id="account-public-url-clash" value="${escapeAttribute(publicUrls.clash)}" readonly />
 				</div>
 				<div class="toolbar">
-					<button class="btn btn-secondary btn-small" data-action="copy-public-url">复制链接</button>
+					<button class="btn btn-secondary btn-small" data-action="copy-public-url">复制 v2ray 链接</button>
+					<button class="btn btn-secondary btn-small" data-action="copy-clash-url">复制 Clash 链接</button>
 					<button class="btn btn-secondary btn-small" data-action="reset-token">重置 token</button>
 					<button class="btn btn-ghost btn-small" data-action="refresh-cache">刷新缓存</button>
 				</div>
@@ -845,6 +876,9 @@ async function submitAuth(form) {
 
 	state.user = response.user;
 	state.config = response.config;
+	if (state.config && !state.config.publicUrls) {
+		state.config.publicUrls = resolvePublicUrls(state.config);
+	}
 	state.preview = null;
 	state.sourceChecks = {};
 	pushNotice(mode === "register" ? "账号已创建，欢迎进入控制台" : "登录成功");
@@ -970,6 +1004,9 @@ async function saveConfig() {
 		}),
 	});
 	state.config = response;
+	if (state.config && !state.config.publicUrls) {
+		state.config.publicUrls = resolvePublicUrls(state.config);
+	}
 	state.preview = null;
 	pushNotice("配置已保存");
 	render();
@@ -1277,4 +1314,14 @@ function escapeHtml(value) {
 
 function escapeAttribute(value) {
 	return escapeHtml(value).replace(/'/g, "&#39;");
+}
+
+function resolvePublicUrls(config) {
+	const base = config?.publicUrl || "";
+	const urls = config?.publicUrls || {};
+	return {
+		v2ray: urls.v2ray || base,
+		clash: urls.clash || (base ? `${base}?format=clash` : ""),
+		raw: urls.raw || (base ? `${base}?raw=1` : ""),
+	};
 }

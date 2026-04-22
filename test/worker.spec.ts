@@ -174,4 +174,134 @@ describe("worker auth and config", () => {
 			"#%5B%E6%9C%BA%E5%9C%BA%20A%5D%20Hong%20Kong%2001",
 		);
 	});
+
+	it("serves clash yaml format for mihomo/clash clients", async () => {
+		const register = await invoke("/api/auth/register", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				username: "clash_user",
+				password: "supersecret123",
+			}),
+		});
+		const registerPayload = await register.json();
+		const cookie = extractCookie(register);
+		const publicToken = registerPayload.config.publicToken;
+
+		await invoke("/api/config", {
+			method: "PUT",
+			headers: {
+				"content-type": "application/json",
+				Cookie: cookie,
+			},
+			body: JSON.stringify({
+				settings: {
+					dedupeEnabled: true,
+					prefixSourceName: false,
+					sourcePrefixTemplate: "[{{source}}] ",
+					keepUnnamed: true,
+					sortMode: "source-priority",
+				},
+				sources: [
+					{
+						id: "source-1",
+						name: "机场 A",
+						url: "https://a.example.com/sub",
+						enabled: true,
+						priority: 1,
+						notes: "",
+					},
+				],
+				renameRules: [],
+			}),
+		});
+
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValue(
+				new Response(
+					[
+						"vless://uuid-1@hk.example.com:443?encryption=none&security=tls&type=ws&host=hk.example.com&path=%2Fws#HK%2001",
+						"trojan://pwd-1@jp.example.com:443?sni=jp.example.com#JP%2001",
+					].join("\n"),
+				),
+			),
+		);
+
+		const response = await invoke(`/sub/${publicToken}?format=clash`);
+		expect(response.status).toBe(200);
+		expect(response.headers.get("content-type")).toContain("text/yaml");
+		expect(response.headers.get("x-subscription-format")).toBe("clash");
+		expect(response.headers.get("profile-title")).toContain("FluxGate-");
+		expect(response.headers.get("content-disposition")).toContain(".yaml");
+		const text = await response.text();
+		expect(text).toContain("proxies:");
+		expect(text).toContain("type: vless");
+		expect(text).toContain("type: trojan");
+		expect(text).toContain("proxy-groups:");
+		expect(text).toContain("rules:");
+	});
+
+	it("detects clash format by user agent", async () => {
+		const register = await invoke("/api/auth/register", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				username: "meta_user",
+				password: "supersecret123",
+			}),
+		});
+		const registerPayload = await register.json();
+		const cookie = extractCookie(register);
+		const publicToken = registerPayload.config.publicToken;
+
+		await invoke("/api/config", {
+			method: "PUT",
+			headers: {
+				"content-type": "application/json",
+				Cookie: cookie,
+			},
+			body: JSON.stringify({
+				settings: {
+					dedupeEnabled: true,
+					prefixSourceName: false,
+					sourcePrefixTemplate: "[{{source}}] ",
+					keepUnnamed: true,
+					sortMode: "source-priority",
+				},
+				sources: [
+					{
+						id: "source-1",
+						name: "机场 A",
+						url: "https://a.example.com/sub",
+						enabled: true,
+						priority: 1,
+						notes: "",
+					},
+				],
+				renameRules: [],
+			}),
+		});
+
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValue(
+				new Response("vless://uuid-1@hk.example.com:443?encryption=none#HK%2001"),
+			),
+		);
+
+		const request = new Request(`http://example.com/sub/${publicToken}`, {
+			headers: {
+				"user-agent": "clash.meta/1.0",
+			},
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-subscription-format")).toBe("clash");
+		expect(response.headers.get("profile-title")).toContain("FluxGate-");
+		expect(await response.text()).toContain("proxies:");
+	});
 });

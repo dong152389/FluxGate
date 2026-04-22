@@ -1,4 +1,5 @@
 import {
+	buildPublicClientUrl,
 	buildPublicUrl,
 	decryptText,
 	encryptText,
@@ -261,6 +262,11 @@ export async function getConfigResponse(
 		user,
 		publicToken: settings.public_token,
 		publicUrl: buildPublicUrl(request, env, settings.public_token),
+		publicUrls: {
+			v2ray: buildPublicUrl(request, env, settings.public_token),
+			clash: buildPublicClientUrl(request, env, settings.public_token, "clash"),
+			raw: buildPublicClientUrl(request, env, settings.public_token, "raw"),
+		},
 		settings: settingsRowToConfig(settings),
 		sources,
 		renameRules,

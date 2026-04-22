@@ -28,6 +28,22 @@ export function buildPublicUrl(
 	return `${origin.replace(/\/$/, "")}/sub/${publicToken}`;
 }
 
+export function buildPublicClientUrl(
+	request: Request,
+	env: AppEnv,
+	publicToken: string,
+	format: "clash" | "raw",
+): string {
+	const base = buildPublicUrl(request, env, publicToken);
+	const target = new URL(base);
+	if (format === "clash") {
+		target.searchParams.set("format", "clash");
+	} else {
+		target.searchParams.set("raw", "1");
+	}
+	return target.toString();
+}
+
 export function getSessionTtlSeconds(env: AppEnv): number {
 	const ttlDays = Number(env.SESSION_TTL_DAYS ?? "30");
 	return Number.isFinite(ttlDays) && ttlDays > 0 ? Math.round(ttlDays * 86400) : 30 * 86400;

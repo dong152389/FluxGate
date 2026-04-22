@@ -110,6 +110,19 @@ npm run cf-typegen
 - Base64 订阅
 - `vless://`
 - `vmess://`
+- 公开订阅自动格式协商：
+  - 默认 `v2rayN`：`/sub/{token}` 返回 Base64 订阅
+  - `?raw=1`：返回明文 URI 列表
+  - `?format=clash`：返回 Clash/Mihomo YAML
+  - 若客户端 UA 含 `clash` / `mihomo` / `clash.meta` / `stash`，会自动返回 YAML
+
+### Mihomo 模板化
+
+- Clash/Mihomo 输出已改为模板驱动，模板文件在 [src/lib/mihomo-template.ts](/Users/dong5/Desktop/sub/src/lib/mihomo-template.ts)
+- 后续你只需要修改模板内容，不用改聚合逻辑
+- 保留两个占位符，不要删除：
+  - `__FLUXGATE_PROXIES__`：节点列表注入位置
+  - `__FLUXGATE_PROXY_GROUPS__`：策略组注入位置
 
 ## 已知边界
 

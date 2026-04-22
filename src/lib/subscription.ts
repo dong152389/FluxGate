@@ -1,7 +1,13 @@
 import { tryDecodeBase64Text, utf8ToBase64 } from "./encoding";
+import {
+	MIHOMO_TEMPLATE,
+	MIHOMO_TEMPLATE_GROUPS_PLACEHOLDER,
+	MIHOMO_TEMPLATE_PROXY_PLACEHOLDER,
+} from "./mihomo-template";
 import { sha256Base64Url } from "./security";
 import type {
 	AggregateResult,
+	ClashBuildResult,
 	ParsedNode,
 	PreviewNode,
 	RenameRuleConfig,
@@ -420,4 +426,872 @@ function decodeHashName(hash: string): string {
 	} catch {
 		return hash.slice(1);
 	}
+}
+
+type ClashProxy = Record<string, string | number | boolean>;
+
+export function buildClashSubscription(nodes: PreviewNode[]): ClashBuildResult {
+	const proxies: ClashProxy[] = [];
+	for (const node of nodes) {
+		const parsed = parseClashProxy(node);
+		if (parsed) {
+			proxies.push(parsed);
+		}
+	}
+
+	ensureUniqueClashProxyNames(proxies);
+	const names = proxies
+		.map((proxy) => String(proxy.name))
+		.filter((value) => value.length > 0);
+	const proxySection = renderClashProxySection(proxies);
+	const proxyGroupsSection = renderClashProxyGroups(names);
+	const yamlText = MIHOMO_TEMPLATE
+		.replace(MIHOMO_TEMPLATE_PROXY_PLACEHOLDER, proxySection)
+		.replace(MIHOMO_TEMPLATE_GROUPS_PLACEHOLDER, proxyGroupsSection);
+
+	return {
+		yamlText,
+		proxyCount: proxies.length,
+		skippedCount: Math.max(nodes.length - proxies.length, 0),
+	};
+}
+
+const CLASH_POLICY_GROUPS = [
+	"🛑 广告拦截",
+	"🤖 AI 服务",
+	"📹 油管视频",
+	"📚 教育学术",
+	"☁️ 云服务",
+	"🔍 谷歌服务",
+	"🏠 私有网络",
+	"🔒 国内服务",
+	"📲 电报消息",
+	"🐱 代码托管",
+	"Ⓜ️ 微软服务",
+	"📺 欧美流媒体",
+	"🍏 苹果服务",
+	"🐦 推特/X",
+	"📘 Meta 系",
+	"🎙️ Discord",
+	"💬 其他社交",
+	"🎬 奈飞",
+	"🏰 迪士尼+",
+	"🎌 亚洲流媒体",
+	"🎮 Steam",
+	"🖥️ PC 游戏",
+	"🎯 主机游戏",
+	"🛠️ 开发工具",
+	"💾 网盘存储",
+	"💳 支付平台",
+	"₿ 加密货币",
+	"📰 新闻资讯",
+	"🛒 海淘购物",
+	"🌍 非中国",
+	"🐟 漏网之鱼",
+];
+
+function renderClashProxySection(proxies: ClashProxy[]): string {
+	if (proxies.length === 0) {
+		return "  []";
+	}
+
+	const lines: string[] = [];
+	for (const proxy of proxies) {
+		lines.push(`  - name: '${escapeYamlSingleQuoted(String(proxy.name))}'`);
+		lines.push(`    type: ${proxy.type}`);
+		lines.push(`    server: '${escapeYamlSingleQuoted(String(proxy.server))}'`);
+		lines.push(`    port: ${Number(proxy.port)}`);
+		for (const [key, value] of Object.entries(proxy)) {
+			if (["name", "type", "server", "port"].includes(key)) {
+				continue;
+			}
+			lines.push(`    ${key}: ${toYamlScalar(value)}`);
+		}
+	}
+	return lines.join("\n");
+}
+
+function renderClashProxyGroups(proxyNames: string[]): string {
+	const normalizedNames = proxyNames.length > 0 ? proxyNames : ["DIRECT"];
+	const lines: string[] = [];
+
+	lines.push(...renderProxyGroup("🚀 节点选择", ["DIRECT", ...normalizedNames]));
+	for (const name of CLASH_POLICY_GROUPS) {
+		if (name === "🛑 广告拦截") {
+			lines.push(...renderProxyGroup(name, ["REJECT", "DIRECT", "🚀 节点选择"]));
+			continue;
+		}
+		if (name === "🏠 私有网络" || name === "🔒 国内服务") {
+			lines.push(...renderProxyGroup(name, ["DIRECT", "🚀 节点选择"]));
+			continue;
+		}
+		lines.push(...renderProxyGroup(name, ["🚀 节点选择", "DIRECT"]));
+	}
+
+	return lines.join("\n");
+}
+
+function renderProxyGroup(name: string, options: string[]): string[] {
+	const deduped = Array.from(new Set(options.filter((value) => value.trim().length > 0)));
+	return [
+		`  - name: '${escapeYamlSingleQuoted(name)}'`,
+		"    type: select",
+		"    proxies:",
+		...deduped.map((value) => `      - '${escapeYamlSingleQuoted(value)}'`),
+	];
+}
+
+function ensureUniqueClashProxyNames(proxies: ClashProxy[]): void {
+	const seen = new Map<string, number>();
+
+	for (const proxy of proxies) {
+		const rawName = String(proxy.name || "").trim();
+		const baseName = rawName || "Unnamed";
+		const current = seen.get(baseName) ?? 0;
+		if (current === 0) {
+			seen.set(baseName, 1);
+			proxy.name = baseName;
+			continue;
+		}
+
+		let suffix = current + 1;
+		let candidate = `${baseName} (${suffix})`;
+		while (seen.has(candidate)) {
+			suffix += 1;
+			candidate = `${baseName} (${suffix})`;
+		}
+		seen.set(baseName, suffix);
+		seen.set(candidate, 1);
+		proxy.name = candidate;
+	}
+}
+
+function parseClashProxy(node: PreviewNode): ClashProxy | null {
+	const schemeIndex = node.finalUri.indexOf("://");
+	if (schemeIndex <= 0) {
+		return null;
+	}
+
+	const protocol = node.finalUri.slice(0, schemeIndex).toLowerCase();
+	if (protocol === "vmess") {
+		return parseVmessToClash(node);
+	}
+	if (protocol === "vless") {
+		return parseVlessToClash(node);
+	}
+	if (protocol === "trojan") {
+		return parseTrojanToClash(node);
+	}
+	if (protocol === "ss") {
+		return parseShadowsocksToClash(node);
+	}
+	if (protocol === "hysteria2" || protocol === "hy2") {
+		return parseHysteria2ToClash(node);
+	}
+	if (protocol === "tuic") {
+		return parseTuicToClash(node);
+	}
+	if (protocol === "anytls") {
+		return parseAnyTlsToClash(node);
+	}
+	return null;
+}
+
+function parseVmessToClash(node: PreviewNode): ClashProxy | null {
+	const encoded = node.finalUri.slice("vmess://".length).trim();
+	const decoded = tryDecodeBase64Text(encoded);
+	if (!decoded) {
+		return null;
+	}
+
+	let payload: Record<string, string>;
+	try {
+		payload = JSON.parse(decoded) as Record<string, string>;
+	} catch {
+		return null;
+	}
+
+	const server = payload.add?.trim();
+	if (!server) {
+		return null;
+	}
+	const port = parsePort(payload.port);
+	const uuid = payload.id?.trim();
+	if (!uuid) {
+		return null;
+	}
+
+	const network = (payload.net || "tcp").toLowerCase();
+	const proxy: ClashProxy = {
+		name: node.finalName || payload.ps || server,
+		type: "vmess",
+		server,
+		port,
+		uuid,
+		alterId: Number.parseInt(payload.aid || "0", 10) || 0,
+		cipher: payload.scy || "auto",
+		tls: isTruthy(payload.tls),
+		udp: true,
+	};
+
+	if (network === "ws" || network === "grpc" || network === "http" || network === "h2") {
+		proxy.network = network;
+	}
+
+	const wsPath = payload.path?.trim() || "";
+	const wsHost = payload.host?.trim() || "";
+	if (network === "ws") {
+		if (wsPath) {
+			proxy["ws-opts"] = `{ path: '${escapeYamlSingleQuoted(wsPath)}'${wsHost ? `, headers: { Host: '${escapeYamlSingleQuoted(wsHost)}' }` : ""} }`;
+		} else if (wsHost) {
+			proxy["ws-opts"] = `{ headers: { Host: '${escapeYamlSingleQuoted(wsHost)}' } }`;
+		}
+	}
+
+	if (network === "grpc") {
+		const serviceName = payload.path?.trim() || "";
+		if (serviceName) {
+			proxy["grpc-opts"] = `{ grpc-service-name: '${escapeYamlSingleQuoted(serviceName)}' }`;
+		}
+	}
+
+	if (proxy.tls) {
+		const sni = payload.sni?.trim() || payload.host?.trim() || "";
+		if (sni) {
+			proxy.servername = sni;
+		}
+	}
+
+	return proxy;
+}
+
+function parseVlessToClash(node: PreviewNode): ClashProxy | null {
+	let urlValue: URL;
+	try {
+		urlValue = new URL(node.finalUri);
+	} catch {
+		return null;
+	}
+
+	const server = urlValue.hostname.trim();
+	if (!server) {
+		return null;
+	}
+	const port = parsePort(urlValue.port);
+	const uuid = decodeURIComponent(urlValue.username || "").trim();
+	if (!uuid) {
+		return null;
+	}
+
+	const security = (urlValue.searchParams.get("security") || "").toLowerCase();
+	const tlsEnabled = security === "tls" || security === "reality" || urlValue.searchParams.get("type") === "ws" && urlValue.searchParams.get("security") === "tls";
+	const network = (urlValue.searchParams.get("type") || "tcp").toLowerCase();
+
+	const proxy: ClashProxy = {
+		name: node.finalName || server,
+		type: "vless",
+		server,
+		port,
+		uuid,
+		udp: true,
+		tls: tlsEnabled,
+		network: ["tcp", "ws", "grpc", "http", "h2"].includes(network) ? network : "tcp",
+	};
+
+	const flow = urlValue.searchParams.get("flow") || "";
+	if (flow) {
+		proxy.flow = flow;
+	}
+
+	const clientFingerprint = urlValue.searchParams.get("fp") || "";
+	if (clientFingerprint) {
+		proxy["client-fingerprint"] = clientFingerprint;
+	}
+
+	const sni = urlValue.searchParams.get("sni") || "";
+	if (sni) {
+		proxy.servername = sni;
+	}
+
+	const alpn = urlValue.searchParams.get("alpn") || "";
+	if (alpn) {
+		proxy.alpn = `[${alpn.split(",").map((item) => `'${escapeYamlSingleQuoted(item.trim())}'`).filter((item) => item !== "''").join(", ")}]`;
+	}
+
+	if (network === "ws") {
+		const path = urlValue.searchParams.get("path") || "";
+		const host = urlValue.searchParams.get("host") || "";
+		if (path) {
+			proxy["ws-opts"] = `{ path: '${escapeYamlSingleQuoted(path)}'${host ? `, headers: { Host: '${escapeYamlSingleQuoted(host)}' }` : ""} }`;
+		} else if (host) {
+			proxy["ws-opts"] = `{ headers: { Host: '${escapeYamlSingleQuoted(host)}' } }`;
+		}
+	}
+
+	if (network === "grpc") {
+		const serviceName = urlValue.searchParams.get("serviceName") || urlValue.searchParams.get("service_name") || "";
+		if (serviceName) {
+			proxy["grpc-opts"] = `{ grpc-service-name: '${escapeYamlSingleQuoted(serviceName)}' }`;
+		}
+	}
+
+	return proxy;
+}
+
+function parseTrojanToClash(node: PreviewNode): ClashProxy | null {
+	let urlValue: URL;
+	try {
+		urlValue = new URL(node.finalUri);
+	} catch {
+		return null;
+	}
+
+	const server = urlValue.hostname.trim();
+	if (!server) {
+		return null;
+	}
+	const port = parsePort(urlValue.port || "443");
+	const password = decodeURIComponent(urlValue.username || "").trim();
+	if (!password) {
+		return null;
+	}
+
+	const network = (urlValue.searchParams.get("type") || "tcp").toLowerCase();
+	const proxy: ClashProxy = {
+		name: node.finalName || server,
+		type: "trojan",
+		server,
+		port,
+		password,
+		udp: true,
+		tls: true,
+		network: ["tcp", "ws", "grpc"].includes(network) ? network : "tcp",
+	};
+
+	const sni = urlValue.searchParams.get("sni") || "";
+	if (sni) {
+		proxy.sni = sni;
+	}
+
+	if (network === "ws") {
+		const path = urlValue.searchParams.get("path") || "";
+		const host = urlValue.searchParams.get("host") || "";
+		if (path) {
+			proxy["ws-opts"] = `{ path: '${escapeYamlSingleQuoted(path)}'${host ? `, headers: { Host: '${escapeYamlSingleQuoted(host)}' }` : ""} }`;
+		} else if (host) {
+			proxy["ws-opts"] = `{ headers: { Host: '${escapeYamlSingleQuoted(host)}' } }`;
+		}
+	}
+
+	if (network === "grpc") {
+		const serviceName = urlValue.searchParams.get("serviceName") || urlValue.searchParams.get("service_name") || "";
+		if (serviceName) {
+			proxy["grpc-opts"] = `{ grpc-service-name: '${escapeYamlSingleQuoted(serviceName)}' }`;
+		}
+	}
+
+	return proxy;
+}
+
+function parseShadowsocksToClash(node: PreviewNode): ClashProxy | null {
+	const raw = node.finalUri.trim();
+	if (!raw.toLowerCase().startsWith("ss://")) {
+		return null;
+	}
+
+	const withoutScheme = raw.slice("ss://".length);
+	const hashIndex = withoutScheme.indexOf("#");
+	const core = hashIndex >= 0 ? withoutScheme.slice(0, hashIndex) : withoutScheme;
+	const atIndex = core.lastIndexOf("@");
+
+	let userInfo = "";
+	let serverPort = "";
+	if (atIndex > -1) {
+		userInfo = core.slice(0, atIndex);
+		serverPort = core.slice(atIndex + 1);
+	} else {
+		const decoded = tryDecodeBase64Text(core);
+		if (!decoded) {
+			return null;
+		}
+		const decodedAt = decoded.lastIndexOf("@");
+		if (decodedAt < 0) {
+			return null;
+		}
+		userInfo = decoded.slice(0, decodedAt);
+		serverPort = decoded.slice(decodedAt + 1);
+	}
+
+	if (!serverPort) {
+		return null;
+	}
+
+	const lastColon = serverPort.lastIndexOf(":");
+	if (lastColon <= 0) {
+		return null;
+	}
+
+	const server = serverPort.slice(0, lastColon).trim();
+	const portRaw = serverPort.slice(lastColon + 1).trim();
+	if (!server || !portRaw) {
+		return null;
+	}
+	const port = parsePort(portRaw);
+
+	const decodedUserInfo = decodeSsUserInfo(userInfo);
+	if (!decodedUserInfo) {
+		return null;
+	}
+
+	const split = decodedUserInfo.indexOf(":");
+	if (split <= 0) {
+		return null;
+	}
+	const cipher = decodedUserInfo.slice(0, split).trim();
+	const password = decodedUserInfo.slice(split + 1).trim();
+	if (!cipher || !password) {
+		return null;
+	}
+
+	return {
+		name: node.finalName || server,
+		type: "ss",
+		server,
+		port,
+		cipher,
+		password,
+		udp: true,
+	};
+}
+
+function parseHysteria2ToClash(node: PreviewNode): ClashProxy | null {
+	let urlValue: URL;
+	try {
+		urlValue = new URL(node.finalUri);
+	} catch {
+		return null;
+	}
+
+	const server = urlValue.hostname.trim();
+	if (!server) {
+		return null;
+	}
+	const port = parsePort(urlValue.port || "443");
+	const password = decodeURIComponent(urlValue.username || urlValue.password || "").trim();
+	if (!password) {
+		return null;
+	}
+
+	const proxy: ClashProxy = {
+		name: node.finalName || server,
+		type: "hysteria2",
+		server,
+		port,
+		password,
+	};
+
+	const sni = firstQuery(urlValue, ["sni", "peer"]);
+	if (sni) {
+		proxy.sni = sni;
+	}
+
+	const skipCertVerify = parseBooleanLike(
+		firstQuery(urlValue, ["skip-cert-verify", "skip_cert_verify", "insecure", "allowinsecure"]),
+	);
+	if (skipCertVerify !== null) {
+		proxy["skip-cert-verify"] = skipCertVerify;
+	}
+
+	const fingerprint = firstQuery(urlValue, ["fp", "fingerprint"]);
+	if (fingerprint) {
+		proxy.fingerprint = fingerprint;
+	}
+
+	const obfs = firstQuery(urlValue, ["obfs"]);
+	if (obfs) {
+		proxy.obfs = obfs;
+	}
+	const obfsPassword = firstQuery(urlValue, ["obfs-password", "obfs_password", "obfsPassword"]);
+	if (obfsPassword) {
+		proxy["obfs-password"] = obfsPassword;
+	}
+
+	const alpn = parseCsvList(firstQuery(urlValue, ["alpn"]));
+	if (alpn.length > 0) {
+		proxy.alpn = formatYamlInlineArray(alpn);
+	}
+
+	const up = normalizeSpeedValue(firstQuery(urlValue, ["up", "upmbps", "up_mbps"]));
+	const down = normalizeSpeedValue(firstQuery(urlValue, ["down", "downmbps", "down_mbps"]));
+	if (up) {
+		proxy.up = up;
+	}
+	if (down) {
+		proxy.down = down;
+	}
+
+	const ports = firstQuery(urlValue, ["ports"]);
+	if (ports) {
+		proxy.ports = ports;
+	}
+
+	const hopInterval = parseIntegerLike(firstQuery(urlValue, ["hop-interval", "hop_interval", "hopInterval"]));
+	if (hopInterval !== null) {
+		proxy["hop-interval"] = hopInterval;
+	}
+
+	return proxy;
+}
+
+function parseTuicToClash(node: PreviewNode): ClashProxy | null {
+	let urlValue: URL;
+	try {
+		urlValue = new URL(node.finalUri);
+	} catch {
+		return null;
+	}
+
+	const server = urlValue.hostname.trim();
+	if (!server) {
+		return null;
+	}
+	const port = parsePort(urlValue.port || "443");
+	const username = decodeURIComponent(urlValue.username || "").trim();
+	const password = decodeURIComponent(urlValue.password || "").trim();
+
+	const proxy: ClashProxy = {
+		name: node.finalName || server,
+		type: "tuic",
+		server,
+		port,
+	};
+
+	if (username && password) {
+		proxy.uuid = username;
+		proxy.password = password;
+	} else if (username) {
+		if (looksLikeUuid(username)) {
+			proxy.uuid = username;
+			const queryPassword = firstQuery(urlValue, ["password", "passwd"]);
+			if (queryPassword) {
+				proxy.password = queryPassword;
+			}
+		} else {
+			proxy.token = username;
+		}
+	}
+
+	if (!proxy.uuid && !proxy.token) {
+		return null;
+	}
+
+	const queryToken = firstQuery(urlValue, ["token"]);
+	if (queryToken && !proxy.token) {
+		proxy.token = queryToken;
+	}
+
+	const queryPassword = firstQuery(urlValue, ["password", "passwd"]);
+	if (queryPassword && !proxy.password) {
+		proxy.password = queryPassword;
+	}
+
+	const sni = firstQuery(urlValue, ["sni"]);
+	if (sni) {
+		proxy.sni = sni;
+	}
+
+	const disableSni = parseBooleanLike(firstQuery(urlValue, ["disable-sni", "disable_sni"]));
+	if (disableSni !== null) {
+		proxy["disable-sni"] = disableSni;
+	}
+
+	const skipCertVerify = parseBooleanLike(
+		firstQuery(urlValue, ["skip-cert-verify", "skip_cert_verify", "insecure", "allowinsecure"]),
+	);
+	if (skipCertVerify !== null) {
+		proxy["skip-cert-verify"] = skipCertVerify;
+	}
+
+	const reduceRtt = parseBooleanLike(firstQuery(urlValue, ["reduce-rtt", "reduce_rtt"]));
+	if (reduceRtt !== null) {
+		proxy["reduce-rtt"] = reduceRtt;
+	}
+
+	const fastOpen = parseBooleanLike(firstQuery(urlValue, ["fast-open", "fast_open"]));
+	if (fastOpen !== null) {
+		proxy["fast-open"] = fastOpen;
+	}
+
+	const udpRelayMode = firstQuery(urlValue, ["udp-relay-mode", "udp_relay_mode"]);
+	if (udpRelayMode) {
+		proxy["udp-relay-mode"] = udpRelayMode;
+	}
+
+	const congestionController = firstQuery(urlValue, [
+		"congestion-controller",
+		"congestion_control",
+		"congestionController",
+	]);
+	if (congestionController) {
+		proxy["congestion-controller"] = congestionController;
+	}
+
+	const heartbeatInterval = parseIntegerLike(firstQuery(urlValue, [
+		"heartbeat-interval",
+		"heartbeat_interval",
+		"heartbeatInterval",
+	]));
+	if (heartbeatInterval !== null) {
+		proxy["heartbeat-interval"] = heartbeatInterval;
+	}
+
+	const requestTimeout = parseIntegerLike(firstQuery(urlValue, [
+		"request-timeout",
+		"request_timeout",
+		"requestTimeout",
+	]));
+	if (requestTimeout !== null) {
+		proxy["request-timeout"] = requestTimeout;
+	}
+
+	const maxUdpRelayPacketSize = parseIntegerLike(firstQuery(urlValue, [
+		"max-udp-relay-packet-size",
+		"max_udp_relay_packet_size",
+	]));
+	if (maxUdpRelayPacketSize !== null) {
+		proxy["max-udp-relay-packet-size"] = maxUdpRelayPacketSize;
+	}
+
+	const maxOpenStreams = parseIntegerLike(firstQuery(urlValue, [
+		"max-open-streams",
+		"max_open_streams",
+	]));
+	if (maxOpenStreams !== null) {
+		proxy["max-open-streams"] = maxOpenStreams;
+	}
+
+	const ip = firstQuery(urlValue, ["ip"]);
+	if (ip) {
+		proxy.ip = ip;
+	}
+
+	const alpn = parseCsvList(firstQuery(urlValue, ["alpn"]));
+	if (alpn.length > 0) {
+		proxy.alpn = formatYamlInlineArray(alpn);
+	}
+
+	return proxy;
+}
+
+function parseAnyTlsToClash(node: PreviewNode): ClashProxy | null {
+	let urlValue: URL;
+	try {
+		urlValue = new URL(node.finalUri);
+	} catch {
+		return null;
+	}
+
+	const server = urlValue.hostname.trim();
+	if (!server) {
+		return null;
+	}
+	const port = parsePort(urlValue.port || "443");
+	const user = decodeURIComponent(urlValue.username || "").trim();
+	const pass = decodeURIComponent(urlValue.password || "").trim();
+	const queryPassword = firstQuery(urlValue, ["password", "passwd", "pass", "token"]);
+	const password = user || pass || queryPassword || "";
+	if (!password) {
+		return null;
+	}
+
+	const proxy: ClashProxy = {
+		name: node.finalName || server,
+		type: "anytls",
+		server,
+		port,
+		password,
+		udp: true,
+	};
+
+	const udpValue = parseBooleanLike(firstQuery(urlValue, ["udp"]));
+	if (udpValue !== null) {
+		proxy.udp = udpValue;
+	}
+
+	const sni = firstQuery(urlValue, ["sni", "servername", "peer"]);
+	if (sni) {
+		proxy.sni = sni;
+	}
+
+	const clientFingerprint = firstQuery(urlValue, [
+		"client-fingerprint",
+		"client_fingerprint",
+		"fp",
+		"fingerprint",
+	]);
+	if (clientFingerprint) {
+		proxy["client-fingerprint"] = clientFingerprint;
+	}
+
+	const alpn = parseCsvList(firstQuery(urlValue, ["alpn"]));
+	if (alpn.length > 0) {
+		proxy.alpn = formatYamlInlineArray(alpn);
+	}
+
+	const skipCertVerify = parseBooleanLike(
+		firstQuery(urlValue, ["skip-cert-verify", "skip_cert_verify", "insecure", "allowinsecure"]),
+	);
+	if (skipCertVerify !== null) {
+		proxy["skip-cert-verify"] = skipCertVerify;
+	}
+
+	const idleCheckInterval = parseIntegerLike(firstQuery(urlValue, [
+		"idle-session-check-interval",
+		"idle_session_check_interval",
+		"idleSessionCheckInterval",
+	]));
+	if (idleCheckInterval !== null) {
+		proxy["idle-session-check-interval"] = idleCheckInterval;
+	}
+
+	const idleTimeout = parseIntegerLike(firstQuery(urlValue, [
+		"idle-session-timeout",
+		"idle_session_timeout",
+		"idleSessionTimeout",
+	]));
+	if (idleTimeout !== null) {
+		proxy["idle-session-timeout"] = idleTimeout;
+	}
+
+	const minIdleSession = parseIntegerLike(firstQuery(urlValue, [
+		"min-idle-session",
+		"min_idle_session",
+		"minIdleSession",
+	]));
+	if (minIdleSession !== null) {
+		proxy["min-idle-session"] = minIdleSession;
+	}
+
+	return proxy;
+}
+
+function decodeSsUserInfo(value: string): string | null {
+	const decoded = tryDecodeBase64Text(value);
+	if (decoded && decoded.includes(":")) {
+		return decoded;
+	}
+	try {
+		const plain = decodeURIComponent(value);
+		if (plain.includes(":")) {
+			return plain;
+		}
+	} catch {
+		return null;
+	}
+	if (value.includes(":")) {
+		return value;
+	}
+	return null;
+}
+
+function parsePort(value: string | undefined): number {
+	const parsed = Number.parseInt(value || "443", 10);
+	if (Number.isNaN(parsed) || parsed <= 0 || parsed > 65535) {
+		return 443;
+	}
+	return parsed;
+}
+
+function parseIntegerLike(value: string | null): number | null {
+	if (!value) {
+		return null;
+	}
+	const parsed = Number.parseInt(value, 10);
+	if (Number.isNaN(parsed)) {
+		return null;
+	}
+	return parsed;
+}
+
+function parseBooleanLike(value: string | null): boolean | null {
+	if (!value) {
+		return null;
+	}
+	const normalized = value.trim().toLowerCase();
+	if (["1", "true", "yes", "on"].includes(normalized)) {
+		return true;
+	}
+	if (["0", "false", "no", "off"].includes(normalized)) {
+		return false;
+	}
+	return null;
+}
+
+function firstQuery(urlValue: URL, keys: string[]): string | null {
+	for (const key of keys) {
+		const value = urlValue.searchParams.get(key);
+		if (value && value.trim()) {
+			return value.trim();
+		}
+	}
+	return null;
+}
+
+function parseCsvList(value: string | null): string[] {
+	if (!value) {
+		return [];
+	}
+	return value
+		.split(",")
+		.map((item) => item.trim())
+		.filter((item) => item.length > 0);
+}
+
+function formatYamlInlineArray(values: string[]): string {
+	return `[${values.map((item) => `'${escapeYamlSingleQuoted(item)}'`).join(", ")}]`;
+}
+
+function normalizeSpeedValue(value: string | null): string | null {
+	if (!value) {
+		return null;
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		return null;
+	}
+	if (/[a-zA-Z]/.test(trimmed)) {
+		return trimmed;
+	}
+	return `${trimmed} Mbps`;
+}
+
+function looksLikeUuid(value: string): boolean {
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function isTruthy(value: string | undefined): boolean {
+	if (!value) {
+		return false;
+	}
+	const normalized = value.toLowerCase();
+	return ["1", "true", "tls", "yes"].includes(normalized);
+}
+
+function escapeYamlSingleQuoted(input: string): string {
+	return input.replace(/'/g, "''");
+}
+
+function toYamlScalar(value: string | number | boolean): string {
+	if (typeof value === "boolean" || typeof value === "number") {
+		return String(value);
+	}
+
+	const trimmed = value.trim();
+	if (
+		(trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+		(trimmed.startsWith("[") && trimmed.endsWith("]"))
+	) {
+		return trimmed;
+	}
+	return `'${escapeYamlSingleQuoted(value)}'`;
 }

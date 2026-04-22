@@ -125,6 +125,11 @@ export interface AggregationConfigResponse {
 	user: UserProfile;
 	publicToken: string;
 	publicUrl: string;
+	publicUrls: {
+		v2ray: string;
+		clash: string;
+		raw: string;
+	};
 	settings: UserSettingsConfig;
 	sources: SourceConfig[];
 	renameRules: RenameRuleConfig[];
@@ -196,4 +201,10 @@ export interface AggregateResult {
 	failedSources: number;
 	rawText: string;
 	encodedText: string;
+}
+
+export interface ClashBuildResult {
+	yamlText: string;
+	proxyCount: number;
+	skippedCount: number;
 }

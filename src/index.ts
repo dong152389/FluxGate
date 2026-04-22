@@ -27,7 +27,12 @@ import {
 	sha256Base64Url,
 	verifyPassword,
 } from "./lib/security";
-import { aggregateSourceConfigs, aggregateSourceRows, testSingleSource } from "./lib/subscription";
+import {
+	aggregateSourceConfigs,
+	aggregateSourceRows,
+	buildClashSubscription,
+	testSingleSource,
+} from "./lib/subscription";
 import type {
 	AppEnv,
 	SaveConfigPayload,
@@ -407,14 +412,14 @@ async function handlePublicSubscription(
 		return new Response("Subscription not found", { status: 404 });
 	}
 
-	const formatRaw = url.searchParams.get("raw") === "1";
-	const cacheKey = `subscription:${context.user.id}:${context.settings.cache_version}:${formatRaw ? "raw" : "b64"}`;
+	const format = resolvePublicFormat(url, request.headers.get("user-agent"));
+	const cacheKey = `subscription:${context.user.id}:${context.settings.cache_version}:${format}`;
 
 	if (env.CACHE) {
 		const cached = await env.CACHE.get(cacheKey);
 		if (cached !== null) {
 			return new Response(cached, {
-				headers: subscriptionHeaders(formatRaw),
+				headers: subscriptionHeaders(format),
 			});
 		}
 	}
@@ -435,13 +440,18 @@ async function handlePublicSubscription(
 		return new Response("No upstream subscription available", { status: 502 });
 	}
 
-	const payload = formatRaw ? aggregate.rawText : aggregate.encodedText;
+	const clash = format === "clash" ? buildClashSubscription(aggregate.nodes) : null;
+	const payload = format === "v2ray-raw"
+		? aggregate.rawText
+		: format === "v2ray-base64"
+			? aggregate.encodedText
+			: clash?.yamlText || "";
 	if (env.CACHE) {
 		ctx.waitUntil(env.CACHE.put(cacheKey, payload, { expirationTtl: getCacheTtlSeconds(env) }));
 	}
 
 	return new Response(payload, {
-		headers: subscriptionHeaders(formatRaw),
+		headers: subscriptionHeaders(format, context.user.username),
 	});
 }
 
@@ -648,12 +658,69 @@ function clampInteger(value: unknown, min: number, max: number): number {
 	return Math.max(min, Math.min(max, Math.round(number)));
 }
 
-function subscriptionHeaders(raw: boolean): HeadersInit {
+type PublicFormat = "v2ray-raw" | "v2ray-base64" | "clash";
+
+function resolvePublicFormat(url: URL, userAgent: string | null): PublicFormat {
+	const explicit = (url.searchParams.get("format") || url.searchParams.get("target") || "").trim().toLowerCase();
+	if (["clash", "mihomo", "meta", "yaml", "yml"].includes(explicit)) {
+		return "clash";
+	}
+	if (["raw", "plain", "text"].includes(explicit)) {
+		return "v2ray-raw";
+	}
+	if (["v2ray", "v2rayn", "base64", "b64"].includes(explicit)) {
+		return "v2ray-base64";
+	}
+
+	if (url.searchParams.get("raw") === "1") {
+		return "v2ray-raw";
+	}
+
+	const ua = (userAgent || "").toLowerCase();
+	if (/\b(clash|mihomo|clash\.meta|meta|stash)\b/.test(ua)) {
+		return "clash";
+	}
+
+	return "v2ray-base64";
+}
+
+function subscriptionHeaders(
+	format: PublicFormat,
+	username?: string,
+): HeadersInit {
+	const profileTitle = buildProfileTitle(format, username);
+	if (format === "clash") {
+		return {
+			"content-type": "text/yaml; charset=UTF-8",
+			"cache-control": "no-store",
+			"x-subscription-format": "clash",
+			"profile-title": profileTitle,
+			"content-disposition": `attachment; filename="${encodeFileName(profileTitle)}.yaml"`,
+		};
+	}
+
 	return {
 		"content-type": "text/plain; charset=UTF-8",
 		"cache-control": "no-store",
-		"x-subscription-format": raw ? "raw" : "base64",
+		"x-subscription-format": format === "v2ray-raw" ? "raw" : "base64",
+		"profile-title": profileTitle,
+		"content-disposition": `attachment; filename="${encodeFileName(profileTitle)}.txt"`,
 	};
+}
+
+function buildProfileTitle(format: PublicFormat, username?: string): string {
+	const cleaned = (username || "user").replace(/[\r\n"]/g, "").trim() || "user";
+	if (format === "clash") {
+		return `FluxGate-${cleaned}-clash`;
+	}
+	if (format === "v2ray-raw") {
+		return `FluxGate-${cleaned}-raw`;
+	}
+	return `FluxGate-${cleaned}-v2ray`;
+}
+
+function encodeFileName(value: string): string {
+	return value.replace(/[^\w.-]+/g, "_");
 }
 
 class HttpError extends Error {
