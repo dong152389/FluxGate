@@ -8,6 +8,7 @@ const state = {
 	toasts: [],
 	sourceChecks: {},
 	loading: true,
+	adminUsers: null,
 };
 
 const app = document.getElementById("app");
@@ -20,14 +21,26 @@ async function boot() {
 	try {
 		const me = await api("/api/auth/me");
 		state.user = me.user;
-		state.config = await api("/api/config");
+		if (state.user?.emailVerified || state.user?.isAdmin) {
+			state.config = await api("/api/config");
+		}
 	} catch (error) {
-		if (error.status !== 401) {
+		if (error.status !== 401 && error.status !== 403) {
 			pushNotice(error.message || "初始化失败", true);
 		}
 	} finally {
 		state.loading = false;
 		render();
+	}
+}
+
+async function loadAdminUsers() {
+	try {
+		const result = await api("/api/admin/users");
+		state.adminUsers = result.users;
+		render();
+	} catch (error) {
+		pushNotice(error.message || "加载用户列表失败", true);
 	}
 }
 
@@ -60,7 +73,29 @@ document.addEventListener("click", async (event) => {
 
 		if (action === "switch-view") {
 			state.activeView = button.dataset.view || "overview";
+			if (state.activeView === "admin") {
+				loadAdminUsers();
+			}
 			render();
+			return;
+		}
+
+		if (action === "send-code") {
+			await withBusy(button, "发送中...", async () => {
+				const form = button.closest("form");
+				const emailInput = form?.querySelector('input[name="email"]');
+				const email = emailInput?.value?.trim();
+				if (!email) {
+					pushNotice("请先填写邮箱", false, "warn");
+					return;
+				}
+				await api("/api/auth/send-code", {
+					method: "POST",
+					body: JSON.stringify({ email, purpose: button.dataset.purpose || "register" }),
+				});
+				pushNotice("验证码已发送，请查收邮件");
+				startCodeCountdown(button);
+			});
 			return;
 		}
 
@@ -180,8 +215,33 @@ document.addEventListener("click", async (event) => {
 				state.preview = null;
 				state.sourceChecks = {};
 				state.activeView = "overview";
+				state.adminUsers = null;
 				pushNotice("已退出登录");
 				render();
+			});
+			return;
+		}
+
+		if (action === "toggle-user-status") {
+			await withBusy(button, "更新中...", async () => {
+				await api('/api/admin/users/' + button.dataset.id + '/status', {
+					method: "POST",
+					body: JSON.stringify({ status: button.dataset.status }),
+				});
+				await loadAdminUsers();
+				pushNotice("用户状态已更新");
+			});
+			return;
+		}
+
+		if (action === "delete-user") {
+			if (!confirm("确定要删除该用户吗？此操作不可恢复。")) {
+				return;
+			}
+			await withBusy(button, "删除中...", async () => {
+				await api('/api/admin/users/' + button.dataset.id, { method: "DELETE" });
+				await loadAdminUsers();
+				pushNotice("用户已删除");
 			});
 			return;
 		}
@@ -287,6 +347,12 @@ document.addEventListener("submit", async (event) => {
 				await submitEmailBinding(form);
 			});
 		}
+
+		if (form.dataset.form === "email-verify") {
+			await withBusy(submitter, "验证中...", async () => {
+				await submitEmailBinding(form);
+			});
+		}
 	} catch (error) {
 		pushNotice(error.message || "提交失败", true);
 		render();
@@ -299,7 +365,17 @@ function render() {
 		return;
 	}
 
-	if (!state.user || !state.config) {
+	if (!state.user) {
+		app.innerHTML = renderAuth();
+		return;
+	}
+
+	if (!state.user.emailVerified && !state.user?.isAdmin) {
+		app.innerHTML = renderVerifyEmailView();
+		return;
+	}
+
+	if (!state.config) {
 		app.innerHTML = renderAuth();
 		return;
 	}
@@ -352,8 +428,15 @@ function renderAuth() {
 									<input id="auth-username" name="username" placeholder="3-32 位字母/数字/._-" autocomplete="username" required />
 								</div>
 								<div class="field">
-									<label for="auth-email">邮箱（可选）</label>
-									<input id="auth-email" name="email" type="email" placeholder="绑定后可用邮箱登录" autocomplete="email" />
+									<label for="auth-email">邮箱</label>
+									<input id="auth-email" name="email" type="email" placeholder="请输入邮箱" autocomplete="email" required />
+								</div>
+								<div class="field">
+									<label for="auth-code">验证码</label>
+									<div class="inline-actions">
+										<input id="auth-code" name="code" placeholder="6 位数字" autocomplete="off" required style="flex:1" />
+										<button class="btn btn-secondary btn-small" type="button" data-action="send-code" data-purpose="register">获取验证码</button>
+									</div>
 								</div>`
 							: `<div class="field">
 									<label for="auth-identifier">账号</label>
@@ -366,6 +449,48 @@ function renderAuth() {
 						<button class="btn btn-primary" type="submit">${isRegister ? "创建账号并进入控制台" : "登录控制台"}</button>
 					</form>
 					<p class="footer-note">用户名或邮箱均可登录，公开订阅链接与登录态分离。</p>
+				</section>
+			</div>
+		</div>
+		${renderToasts()}
+	`;
+}
+
+function renderVerifyEmailView() {
+	return `
+		<div class="auth-wrap">
+			<div class="auth-card">
+				<section class="auth-hero">
+					<div class="eyebrow">安全验证</div>
+					<h1>验证邮箱</h1>
+					<p>为了保障账号安全，请先验证邮箱地址。</p>
+					<ul>
+						<li>验证后可使用全部功能</li>
+						<li>可用邮箱登录和找回密码</li>
+						<li>接收重要安全通知</li>
+					</ul>
+				</section>
+				<section class="auth-panel">
+					<h2>绑定邮箱</h2>
+					<form data-form="email-verify" class="stack">
+						<div class="field">
+							<label for="verify-email">邮箱</label>
+							<input id="verify-email" name="email" type="email" placeholder="name@example.com" autocomplete="email" required />
+						</div>
+						<div class="field">
+							<label for="verify-code">验证码</label>
+							<div class="inline-actions">
+								<input id="verify-code" name="code" placeholder="6 位数字" autocomplete="off" required style="flex:1" />
+								<button class="btn btn-secondary btn-small" type="button" data-action="send-code" data-purpose="bind">获取验证码</button>
+							</div>
+						</div>
+						<div class="field">
+							<label for="verify-password">当前密码</label>
+							<input id="verify-password" name="currentPassword" type="password" placeholder="验证身份" autocomplete="current-password" required />
+						</div>
+						<button class="btn btn-primary" type="submit">验证并进入</button>
+					</form>
+					<p class="footer-note">验证完成后即可使用全部功能。</p>
 				</section>
 			</div>
 		</div>
@@ -394,6 +519,18 @@ function renderDashboard() {
 	`;
 }
 
+function getNavItems() {
+	const items = [...NAV_ITEMS];
+	if (state.user?.isAdmin) {
+		items.push({
+			id: "admin",
+			label: "用户管理",
+			icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3 14c0-3.5 10-3.5 10 0"/></svg>`,
+		});
+	}
+	return items;
+}
+
 function renderSidebar(activeView) {
 	const username = state.user?.username || "";
 	const initial = username.slice(0, 1).toUpperCase() || "U";
@@ -407,7 +544,7 @@ function renderSidebar(activeView) {
 				</div>
 			</div>
 			<nav class="sidebar-nav">
-				${NAV_ITEMS.map((item) => `
+				${getNavItems().map((item) => `
 					<button class="nav-item ${item.id === activeView ? "active" : ""}" data-action="switch-view" data-view="${item.id}">
 						<span class="nav-icon">${item.icon}</span>
 						<span>${item.label}</span>
@@ -433,6 +570,7 @@ function renderWorkspace(view) {
 	if (view === "rules") return renderRulesView();
 	if (view === "preview") return renderPreviewView();
 	if (view === "account") return renderAccountView();
+	if (view === "admin") return renderAdminView();
 	return renderOverview();
 }
 
@@ -669,6 +807,61 @@ function renderAccountView() {
 	`;
 }
 
+function renderAdminView() {
+	const users = state.adminUsers || [];
+	return `
+		${renderWorkspaceHead("FluxGate · 用户管理", "用户管理", "查看和管理系统注册用户")}
+		<div class="workspace-body">
+			<section class="card">
+				<div class="card-head">
+					<h3>用户列表</h3>
+					<p>共 ${users.length} 位注册用户</p>
+				</div>
+				<div style="overflow-x: auto;">
+					<table class="preview-table">
+						<thead>
+							<tr>
+								<th>ID</th>
+								<th>用户名</th>
+								<th>邮箱</th>
+								<th>角色</th>
+								<th>状态</th>
+								<th>注册时间</th>
+								<th>操作</th>
+							</tr>
+						</thead>
+						<tbody>
+							${users.map((user) => `
+								<tr>
+									<td>${escapeHtml(user.id)}</td>
+									<td>${escapeHtml(user.username)}</td>
+									<td>${escapeHtml(user.email || "—")}</td>
+									<td><span class="badge ${user.isAdmin ? "warn" : "ok"}">${user.isAdmin ? "管理员" : "普通用户"}</span></td>
+									<td><span class="badge ${user.status === "active" ? "ok" : "fail"}">${user.status === "active" ? "正常" : "已禁用"}</span></td>
+									<td>${escapeHtml(new Date(user.created_at).toLocaleString("zh-CN"))}</td>
+									<td>
+										${user.isAdmin
+											? `<span class="muted">—</span>`
+											: `<div class="inline-actions">
+												${user.status === "active"
+													? `<button class="btn btn-ghost btn-small" data-action="toggle-user-status" data-id="${escapeAttribute(user.id)}" data-status="disabled">禁用</button>`
+													: `<button class="btn btn-secondary btn-small" data-action="toggle-user-status" data-id="${escapeAttribute(user.id)}" data-status="active">启用</button>`
+												}
+												<button class="btn btn-danger btn-small" data-action="delete-user" data-id="${escapeAttribute(user.id)}">删除</button>
+											</div>`
+										}
+									</td>
+								</tr>
+							`).join("")}
+							${users.length === 0 ? `<tr><td colspan="7" style="text-align:center;color:var(--muted)">暂无用户</td></tr>` : ""}
+						</tbody>
+					</table>
+				</div>
+			</section>
+		</div>
+	`;
+}
+
 function renderSourceCard(source, index) {
 	const check = state.sourceChecks[source.id];
 	return `
@@ -863,6 +1056,7 @@ async function submitAuth(form) {
 			username: `${formData.get("username") || ""}`.trim(),
 			email: `${formData.get("email") || ""}`.trim(),
 			password,
+			code: `${formData.get("code") || ""}`.trim(),
 		}
 		: {
 			identifier: `${formData.get("identifier") || ""}`.trim(),
@@ -874,7 +1068,13 @@ async function submitAuth(form) {
 		body: JSON.stringify(payload),
 	});
 
-	state.user = response.user;
+	const responseUser = response.user || {};
+	const configUser = response.config?.user || {};
+	state.user = {
+		...configUser,
+		...responseUser,
+		isAdmin: responseUser.isAdmin ?? configUser.isAdmin ?? false,
+	};
 	state.config = response.config;
 	if (state.config && !state.config.publicUrls) {
 		state.config.publicUrls = resolvePublicUrls(state.config);
@@ -903,14 +1103,16 @@ async function submitEmailBinding(form) {
 	const formData = new FormData(form);
 	const email = `${formData.get("email") || ""}`.trim();
 	const currentPassword = `${formData.get("currentPassword") || ""}`;
+	const code = `${formData.get("code") || ""}`.trim();
 
 	const response = await api("/api/auth/email", {
 		method: "POST",
-		body: JSON.stringify({ email, currentPassword }),
+		body: JSON.stringify({ email, currentPassword, code }),
 	});
 
 	if (state.user) {
 		state.user.email = response.user?.email ?? null;
+		state.user.emailVerified = response.user?.emailVerified ?? false;
 	}
 	form.reset();
 	pushNotice(email ? "邮箱已绑定" : "邮箱已解除绑定");
@@ -1314,6 +1516,22 @@ function escapeHtml(value) {
 
 function escapeAttribute(value) {
 	return escapeHtml(value).replace(/'/g, "&#39;");
+}
+
+function startCodeCountdown(button) {
+	let seconds = 60;
+	button.disabled = true;
+	button.textContent = `${seconds}s`;
+	const timer = setInterval(() => {
+		seconds -= 1;
+		if (seconds <= 0) {
+			clearInterval(timer);
+			button.disabled = false;
+			button.textContent = "获取验证码";
+		} else {
+			button.textContent = `${seconds}s`;
+		}
+	}, 1000);
 }
 
 function resolvePublicUrls(config) {

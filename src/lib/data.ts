@@ -8,6 +8,7 @@ import {
 	randomToken,
 } from "./security";
 import type {
+	AdminUserListItem,
 	AppEnv,
 	AggregationConfigResponse,
 	NodeAliasRow,
@@ -110,6 +111,7 @@ export async function createUser(
 		id: userId,
 		username: input.username,
 		email: input.email,
+		emailVerified: false,
 	};
 }
 
@@ -153,6 +155,7 @@ export async function findSessionUser(
 				 users.id AS user_id,
 				 users.username,
 				 users.email,
+				 users.email_verified,
 				 users.status
 				 FROM sessions
 				 JOIN users ON users.id = sessions.user_id
@@ -467,6 +470,7 @@ export async function getPublicSubscriptionContext(
 			id: user.id,
 			username: user.username,
 			email: user.email,
+			emailVerified: Boolean(user.email_verified),
 		},
 		settings,
 		sources: await listSources(db, user.id),
@@ -484,4 +488,81 @@ export async function getSettingsOrThrow(
 		throw new Error("User settings missing");
 	}
 	return settings;
+}
+
+export async function isAdmin(db: D1Database, userId: string): Promise<boolean> {
+	const firstUser = await db
+		.prepare("SELECT id FROM users ORDER BY created_at ASC LIMIT 1")
+		.first<{ id: string }>();
+	return firstUser ? firstUser.id === userId : false;
+}
+
+export async function listAllUsers(db: D1Database): Promise<AdminUserListItem[]> {
+	const result = await db
+		.prepare("SELECT id, username, email, status, created_at, updated_at FROM users ORDER BY created_at ASC")
+		.all<AdminUserListItem>();
+	const rows = result.results ?? [];
+	return rows.map((user, index) => ({ ...user, isAdmin: index === 0 }));
+}
+
+export async function updateUserStatus(
+	db: D1Database,
+	userId: string,
+	status: "active" | "disabled",
+): Promise<void> {
+	await db
+		.prepare("UPDATE users SET status = ?, updated_at = ? WHERE id = ?")
+		.bind(status, nowIso(), userId)
+		.run();
+}
+
+export async function deleteUserAndData(db: D1Database, userId: string): Promise<void> {
+	await db.prepare("DELETE FROM users WHERE id = ?").bind(userId).run();
+}
+
+export async function createVerificationCode(
+	db: D1Database,
+	input: { email: string; code: string; purpose: string; ttlMinutes: number },
+): Promise<void> {
+	const createdAt = nowIso();
+	const expiresAt = new Date(Date.now() + input.ttlMinutes * 60_000).toISOString();
+	await db
+		.prepare(
+			`INSERT INTO verification_codes (id, email, code, purpose, used, expires_at, created_at)
+			 VALUES (?, ?, ?, ?, 0, ?, ?)`,
+		)
+		.bind(randomId(), input.email, input.code, input.purpose, expiresAt, createdAt)
+		.run();
+}
+
+export async function findLatestVerificationCode(
+	db: D1Database,
+	email: string,
+	purpose: string,
+): Promise<{ id: string; code: string; used: number; expires_at: string } | null> {
+	return (
+		(await db
+			.prepare(
+				`SELECT id, code, used, expires_at FROM verification_codes
+				 WHERE email = ? AND purpose = ?
+				 ORDER BY created_at DESC LIMIT 1`,
+			)
+			.bind(email, purpose)
+			.first<{ id: string; code: string; used: number; expires_at: string }>()) ?? null
+	);
+}
+
+export async function markVerificationCodeUsed(db: D1Database, id: string): Promise<void> {
+	await db.prepare("UPDATE verification_codes SET used = 1 WHERE id = ?").bind(id).run();
+}
+
+export async function updateUserEmailVerified(
+	db: D1Database,
+	userId: string,
+	verified: boolean,
+): Promise<void> {
+	await db
+		.prepare("UPDATE users SET email_verified = ?, updated_at = ? WHERE id = ?")
+		.bind(verified ? 1 : 0, nowIso(), userId)
+		.run();
 }

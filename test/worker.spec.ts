@@ -5,7 +5,9 @@ import {
 } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src";
+import { createUser } from "../src/lib/data";
 import { CREATE_SCHEMA_SQL, RESET_SCHEMA_SQL } from "../src/lib/db-schema";
+import { hashPassword } from "../src/lib/security";
 
 async function invoke(
 	path: string,
@@ -21,7 +23,7 @@ async function invoke(
 function extractCookie(response: Response): string {
 	const cookie = response.headers.get("Set-Cookie");
 	expect(cookie).toBeTruthy();
-	return cookie.split(";")[0];
+	return cookie!.split(";")[0];
 }
 
 async function execStatements(db: D1Database, sql: string): Promise<void> {
@@ -35,42 +37,119 @@ async function execStatements(db: D1Database, sql: string): Promise<void> {
 	}
 }
 
+async function seedVerificationCode(
+	email: string,
+	purpose: "register" | "bind" = "register",
+	code = "123456",
+): Promise<void> {
+	const createdAt = new Date().toISOString();
+	const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+	await env.DB
+		.prepare(
+			`INSERT INTO verification_codes (id, email, code, purpose, used, expires_at, created_at)
+			 VALUES (?, ?, ?, ?, 0, ?, ?)`,
+		)
+		.bind(`code-${email}-${purpose}`, email, code, purpose, expiresAt, createdAt)
+		.run();
+}
+
+async function registerVerifiedUser(
+	username: string,
+	email = `${username}@example.com`,
+	password = "supersecret123",
+): Promise<Response> {
+	await seedVerificationCode(email, "register");
+	return invoke("/api/auth/register", {
+		method: "POST",
+		headers: {
+			"content-type": "application/json",
+		},
+		body: JSON.stringify({
+			username,
+			email,
+			password,
+			code: "123456",
+		}),
+	});
+}
+
 beforeEach(async () => {
 	await execStatements(env.DB, RESET_SCHEMA_SQL);
 	await execStatements(env.DB, CREATE_SCHEMA_SQL);
 	vi.unstubAllGlobals();
+	delete env.SMTP_HOST;
+	delete env.SMTP_FROM;
 });
 
 describe("worker auth and config", () => {
-	it("registers a user and returns the initial config", async () => {
-		const response = await invoke("/api/auth/register", {
+	it("lets a legacy admin without email log in without losing the admin flag", async () => {
+		const password = "supersecret123";
+		const { hash, salt } = await hashPassword(password);
+		await createUser(env, {
+			username: "legacy_admin",
+			email: null,
+			passwordHash: hash,
+			passwordSalt: salt,
+		});
+
+		const response = await invoke("/api/auth/login", {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
 			},
 			body: JSON.stringify({
-				username: "tester_01",
-				email: "tester@example.com",
-				password: "supersecret123",
+				identifier: "legacy_admin",
+				password,
 			}),
 		});
 
 		expect(response.status).toBe(200);
 		const payload = await response.json();
+		expect(payload.user.username).toBe("legacy_admin");
+		expect(payload.user.emailVerified).toBe(false);
+		expect(payload.user.isAdmin).toBe(true);
+		expect(payload.config.user.isAdmin).toBe(true);
+	});
+
+	it("registers a verified user and returns the initial config", async () => {
+		const response = await registerVerifiedUser("tester_01");
+
+		expect(response.status).toBe(200);
+		const payload = await response.json();
 		expect(payload.user.username).toBe("tester_01");
+		expect(payload.user.emailVerified).toBe(true);
 		expect(payload.config.publicUrl).toContain("/sub/");
 		expect(payload.config.sources).toEqual([]);
 	});
 
-	it("persists config changes for the authenticated user", async () => {
-		const register = await invoke("/api/auth/register", {
+	it("creates a verification code row when sending email codes", async () => {
+		env.SMTP_HOST = "https://mailer.example.com/send";
+		env.SMTP_FROM = "noreply@example.com";
+		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("ok", { status: 200 })));
+
+		const response = await invoke("/api/auth/send-code", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
-				username: "operator",
-				password: "supersecret123",
+				email: "verify@example.com",
+				purpose: "register",
 			}),
 		});
+
+		expect(response.status).toBe(200);
+		const row = await env.DB
+			.prepare("SELECT email, purpose, used FROM verification_codes WHERE email = ?")
+			.bind("verify@example.com")
+			.first<{ email: string; purpose: string; used: number }>();
+		expect(row).toEqual({
+			email: "verify@example.com",
+			purpose: "register",
+			used: 0,
+		});
+	});
+
+	it("persists config changes for the authenticated user", async () => {
+		const register = await registerVerifiedUser("operator");
 		const cookie = extractCookie(register);
 
 		const save = await invoke("/api/config", {
@@ -119,14 +198,7 @@ describe("worker auth and config", () => {
 	});
 
 	it("serves a public aggregated subscription", async () => {
-		const register = await invoke("/api/auth/register", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				username: "publisher",
-				password: "supersecret123",
-			}),
-		});
+		const register = await registerVerifiedUser("publisher");
 		const registerPayload = await register.json();
 		const cookie = extractCookie(register);
 		const publicToken = registerPayload.config.publicToken;
@@ -176,14 +248,7 @@ describe("worker auth and config", () => {
 	});
 
 	it("serves clash yaml format for mihomo/clash clients", async () => {
-		const register = await invoke("/api/auth/register", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				username: "clash_user",
-				password: "supersecret123",
-			}),
-		});
+		const register = await registerVerifiedUser("clash_user");
 		const registerPayload = await register.json();
 		const cookie = extractCookie(register);
 		const publicToken = registerPayload.config.publicToken;
@@ -243,14 +308,7 @@ describe("worker auth and config", () => {
 	});
 
 	it("detects clash format by user agent", async () => {
-		const register = await invoke("/api/auth/register", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				username: "meta_user",
-				password: "supersecret123",
-			}),
-		});
+		const register = await registerVerifiedUser("meta_user");
 		const registerPayload = await register.json();
 		const cookie = extractCookie(register);
 		const publicToken = registerPayload.config.publicToken;

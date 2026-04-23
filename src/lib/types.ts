@@ -7,6 +7,12 @@ export interface AppEnv {
 	PUBLIC_BASE_URL?: string;
 	SESSION_TTL_DAYS?: string;
 	CACHE_TTL_SECONDS?: string;
+	SMTP_HOST?: string;
+	SMTP_PORT?: string;
+	SMTP_USER?: string;
+	SMTP_PASS?: string;
+	SMTP_FROM?: string;
+	EMAIL_WHITELIST?: string;
 }
 
 export type UserStatus = "active" | "disabled";
@@ -17,6 +23,7 @@ export interface UserRow {
 	id: string;
 	username: string;
 	email: string | null;
+	email_verified: number;
 	password_hash: string;
 	password_salt: string;
 	status: UserStatus;
@@ -85,13 +92,36 @@ export interface SessionUserRow {
 	user_id: string;
 	username: string;
 	email: string | null;
+	email_verified: number;
 	status: UserStatus;
+}
+
+export interface VerificationCodeRow {
+	id: string;
+	email: string;
+	code: string;
+	purpose: string;
+	used: number;
+	expires_at: string;
+	created_at: string;
 }
 
 export interface UserProfile {
 	id: string;
 	username: string;
 	email: string | null;
+	emailVerified: boolean;
+	isAdmin?: boolean;
+}
+
+export interface AdminUserListItem {
+	id: string;
+	username: string;
+	email: string | null;
+	status: UserStatus;
+	isAdmin: boolean;
+	created_at: string;
+	updated_at: string;
 }
 
 export interface SourceConfig {

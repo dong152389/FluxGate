@@ -2,20 +2,29 @@ import {
 	bumpCacheVersion,
 	createSession,
 	createUser,
+	createVerificationCode,
 	deleteSessionByHash,
+	deleteUserAndData,
+	findLatestVerificationCode,
 	findSessionUser,
 	findUserByEmail,
 	findUserByUsername,
 	getConfigResponse,
 	getPublicSubscriptionContext,
+	isAdmin,
 	listAliases,
+	listAllUsers,
+	markVerificationCodeUsed,
 	rotatePublicToken,
 	saveAlias,
 	saveAliasesBatch,
 	saveConfig,
 	touchSession,
 	updateUserEmail,
+	updateUserEmailVerified,
+	updateUserStatus,
 } from "./lib/data";
+import { checkEmailWhitelist, generateVerificationCode, sendEmail } from "./lib/email";
 import { apiError, getCookie, json, makeCookie, readJson } from "./lib/http";
 import {
 	buildPublicUrl,
@@ -76,7 +85,8 @@ async function routeRequest(
 
 	if (request.method === "GET" && url.pathname === "/api/auth/me") {
 		const user = await requireUser(request, env);
-		return json({ user });
+		const admin = await isAdmin(env.DB, user.id);
+		return json({ user: { ...user, isAdmin: admin } });
 	}
 
 	if (request.method === "POST" && url.pathname === "/api/auth/change-password") {
@@ -91,8 +101,24 @@ async function routeRequest(
 		return handleResetPublicToken(request, env);
 	}
 
+	if (request.method === "POST" && url.pathname === "/api/auth/send-code") {
+		return handleSendCode(request, env);
+	}
+
+	if (request.method === "GET" && url.pathname === "/api/admin/users") {
+		return handleListUsers(request, env);
+	}
+
+	if (request.method === "POST" && url.pathname.startsWith("/api/admin/users/") && url.pathname.endsWith("/status")) {
+		return handleUpdateUserStatus(request, env);
+	}
+
+	if (request.method === "DELETE" && url.pathname.startsWith("/api/admin/users/")) {
+		return handleDeleteUser(request, env);
+	}
+
 	if (request.method === "GET" && url.pathname === "/api/config") {
-		const user = await requireUser(request, env);
+		const user = await requireVerifiedUser(request, env);
 		const config = await getConfigResponse(request, env, user);
 		return json(config);
 	}
@@ -133,14 +159,34 @@ async function routeRequest(
 }
 
 async function handleRegister(request: Request, env: AppEnv): Promise<Response> {
-	const body = await readJson<{ username?: string; email?: string; password?: string }>(request);
+	const body = await readJson<{
+		username?: string;
+		email?: string;
+		password?: string;
+		code?: string;
+	}>(request);
 	const username = normalizeUsername(body.username);
-	const email = normalizeOptionalEmail(body.email);
+	const email = normalizeEmail(body.email);
 	const password = normalizePassword(body.password);
+	const code = normalizeCode(body.code);
+
+	if (!checkEmailWhitelist(email, env)) {
+		return apiError(403, "该邮箱不在允许列表中");
+	}
 
 	const existingUser = await findUserByUsername(env.DB, username);
 	if (existingUser) {
 		return apiError(409, "用户名已存在");
+	}
+
+	const existingEmail = await findUserByEmail(env.DB, email);
+	if (existingEmail) {
+		return apiError(409, "该邮箱已被注册");
+	}
+
+	const valid = await verifyCode(env.DB, email, "register", code);
+	if (!valid) {
+		return apiError(400, "验证码错误或已过期");
 	}
 
 	const { hash, salt } = await hashPassword(password);
@@ -150,8 +196,12 @@ async function handleRegister(request: Request, env: AppEnv): Promise<Response> 
 		passwordHash: hash,
 		passwordSalt: salt,
 	});
+	await updateUserEmailVerified(env.DB, user.id, true);
 
-	return makeSessionResponse(request, env, user);
+	return makeSessionResponse(request, env, {
+		...user,
+		emailVerified: true,
+	});
 }
 
 async function handleLogin(request: Request, env: AppEnv): Promise<Response> {
@@ -176,6 +226,7 @@ async function handleLogin(request: Request, env: AppEnv): Promise<Response> {
 		id: user.id,
 		username: user.username,
 		email: user.email,
+		emailVerified: Boolean(user.email_verified),
 	});
 }
 
@@ -239,10 +290,15 @@ async function handleChangePassword(request: Request, env: AppEnv): Promise<Resp
 
 async function handleUpdateEmail(request: Request, env: AppEnv): Promise<Response> {
 	const auth = await requireAuthRecord(request, env);
-	const body = await readJson<{ email?: string; currentPassword?: string }>(request);
+	const body = await readJson<{
+		email?: string;
+		currentPassword?: string;
+		code?: string;
+	}>(request);
 	const rawEmail = (body.email ?? "").trim();
 	const email = rawEmail ? normalizeEmail(rawEmail) : null;
 	const currentPassword = normalizePassword(body.currentPassword);
+	const code = normalizeCode(body.code);
 
 	const user = await findUserByUsername(env.DB, auth.user.username);
 	if (!user) {
@@ -259,13 +315,25 @@ async function handleUpdateEmail(request: Request, env: AppEnv): Promise<Respons
 	}
 
 	if (email) {
+		if (!checkEmailWhitelist(email, env)) {
+			return apiError(403, "该邮箱不在允许列表中");
+		}
 		const existing = await findUserByEmail(env.DB, email);
 		if (existing && existing.id !== user.id) {
 			return apiError(409, "该邮箱已被其他账号绑定");
 		}
+		const valid = await verifyCode(env.DB, email, "bind", code);
+		if (!valid) {
+			return apiError(400, "验证码错误或已过期");
+		}
 	}
 
 	await updateUserEmail(env.DB, user.id, email);
+	if (email) {
+		await updateUserEmailVerified(env.DB, user.id, true);
+	} else {
+		await updateUserEmailVerified(env.DB, user.id, false);
+	}
 
 	return json({
 		ok: true,
@@ -273,13 +341,80 @@ async function handleUpdateEmail(request: Request, env: AppEnv): Promise<Respons
 			id: user.id,
 			username: user.username,
 			email,
+			emailVerified: Boolean(email),
 		},
 	});
 }
 
+async function handleSendCode(request: Request, env: AppEnv): Promise<Response> {
+	const body = await readJson<{ email?: string; purpose?: string }>(request);
+	const email = normalizeEmail(body.email);
+	const purpose = ["register", "bind"].includes(body.purpose || "")
+		? (body.purpose as "register" | "bind")
+		: "register";
+
+	if (!checkEmailWhitelist(email, env)) {
+		return apiError(403, "该邮箱不在允许列表中");
+	}
+
+	const latest = await findLatestVerificationCode(env.DB, email, purpose);
+	if (latest) {
+		const cooldown = 60_000;
+		const createdAt = new Date(latest.expires_at).getTime() - 10 * 60_000;
+		if (Date.now() - createdAt < cooldown) {
+			return apiError(429, "发送过于频繁，请稍后再试");
+		}
+	}
+
+	const code = generateVerificationCode();
+	await createVerificationCode(env.DB, { email, code, purpose, ttlMinutes: 10 });
+
+	try {
+		await sendEmail(env, {
+			to: email,
+			subject: `【${env.APP_NAME || "FluxGate"}】验证码`,
+			text: `您的验证码是：${code}，10分钟内有效。如非本人操作，请忽略此邮件。`,
+		});
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "邮件发送失败";
+		return apiError(500, message);
+	}
+
+	return json({ ok: true });
+}
+
+async function verifyCode(
+	db: D1Database,
+	email: string,
+	purpose: string,
+	code: string,
+): Promise<boolean> {
+	const row = await findLatestVerificationCode(db, email, purpose);
+	if (!row || row.used) {
+		return false;
+	}
+	if (new Date(row.expires_at).getTime() <= Date.now()) {
+		return false;
+	}
+	if (row.code !== code) {
+		return false;
+	}
+	await markVerificationCodeUsed(db, row.id);
+	return true;
+}
+
+async function requireVerifiedUser(request: Request, env: AppEnv): Promise<UserProfile> {
+	const user = await requireUser(request, env);
+	const admin = await isAdmin(env.DB, user.id);
+	if (!admin && !user.emailVerified) {
+		throw new HttpError(403, "请先验证邮箱");
+	}
+	return user;
+}
+
 async function handleResetPublicToken(request: Request, env: AppEnv): Promise<Response> {
-	const auth = await requireAuthRecord(request, env);
-	const settings = await rotatePublicToken(env.DB, auth.user.id);
+	const user = await requireVerifiedUser(request, env);
+	const settings = await rotatePublicToken(env.DB, user.id);
 	return json({
 		ok: true,
 		publicToken: settings.public_token,
@@ -288,16 +423,16 @@ async function handleResetPublicToken(request: Request, env: AppEnv): Promise<Re
 }
 
 async function handleSaveConfig(request: Request, env: AppEnv): Promise<Response> {
-	const auth = await requireAuthRecord(request, env);
+	const user = await requireVerifiedUser(request, env);
 	const body = await readJson<SaveConfigPayload>(request);
 	const payload = sanitizeConfigPayload(body);
-	await saveConfig(env, auth.user.id, payload);
-	const config = await getConfigResponse(request, env, auth.user);
+	await saveConfig(env, user.id, payload);
+	const config = await getConfigResponse(request, env, user);
 	return json(config);
 }
 
 async function handleTestSource(request: Request, env: AppEnv): Promise<Response> {
-	await requireUser(request, env);
+	await requireVerifiedUser(request, env);
 	const body = await readJson<Partial<SourceConfig>>(request);
 	const source = sanitizeSource({
 		id: body.id ?? crypto.randomUUID(),
@@ -313,7 +448,7 @@ async function handleTestSource(request: Request, env: AppEnv): Promise<Response
 }
 
 async function handlePreview(request: Request, env: AppEnv): Promise<Response> {
-	const user = await requireUser(request, env);
+	const user = await requireVerifiedUser(request, env);
 	const config = await getConfigResponse(request, env, user);
 	const aliases = await listAliases(env.DB, user.id);
 	const aggregate = await aggregateSourceConfigs({
@@ -331,7 +466,7 @@ async function handlePreview(request: Request, env: AppEnv): Promise<Response> {
 }
 
 async function handleRenameNode(request: Request, env: AppEnv): Promise<Response> {
-	const auth = await requireAuthRecord(request, env);
+	const auth = await requireVerifiedUser(request, env);
 	const body = await readJson<{ fingerprint?: string; alias?: string }>(request);
 	const fingerprint = body.fingerprint?.trim();
 	const alias = (body.alias ?? "").trim();
@@ -344,13 +479,13 @@ async function handleRenameNode(request: Request, env: AppEnv): Promise<Response
 		return apiError(400, "别名长度不能超过 120 个字符");
 	}
 
-	await saveAlias(env.DB, auth.user.id, fingerprint, alias);
-	await bumpCacheVersion(env.DB, auth.user.id);
+	await saveAlias(env.DB, auth.id, fingerprint, alias);
+	await bumpCacheVersion(env.DB, auth.id);
 	return json({ ok: true });
 }
 
 async function handleRenameNodes(request: Request, env: AppEnv): Promise<Response> {
-	const auth = await requireAuthRecord(request, env);
+	const auth = await requireVerifiedUser(request, env);
 	const body = await readJson<{ updates?: Array<{ fingerprint?: string; alias?: string }> }>(request);
 	const rawUpdates = Array.isArray(body.updates) ? body.updates : [];
 
@@ -381,13 +516,13 @@ async function handleRenameNodes(request: Request, env: AppEnv): Promise<Respons
 		return json({ ok: true, count: 0 });
 	}
 
-	await saveAliasesBatch(env.DB, auth.user.id, normalized);
-	await bumpCacheVersion(env.DB, auth.user.id);
+	await saveAliasesBatch(env.DB, auth.id, normalized);
+	await bumpCacheVersion(env.DB, auth.id);
 	return json({ ok: true, count: normalized.length });
 }
 
 async function handleRefresh(request: Request, env: AppEnv): Promise<Response> {
-	const user = await requireUser(request, env);
+	const user = await requireVerifiedUser(request, env);
 	const settings = await bumpCacheVersion(env.DB, user.id);
 	return json({
 		ok: true,
@@ -460,6 +595,57 @@ async function requireUser(request: Request, env: AppEnv): Promise<UserProfile> 
 	return auth.user;
 }
 
+async function requireAdmin(request: Request, env: AppEnv): Promise<UserProfile> {
+	const user = await requireUser(request, env);
+	const admin = await isAdmin(env.DB, user.id);
+	if (!admin) {
+		throw new HttpError(403, "需要管理员权限");
+	}
+	return user;
+}
+
+async function handleListUsers(request: Request, env: AppEnv): Promise<Response> {
+	await requireAdmin(request, env);
+	const users = await listAllUsers(env.DB);
+	return json({ users });
+}
+
+async function handleUpdateUserStatus(request: Request, env: AppEnv): Promise<Response> {
+	const admin = await requireAdmin(request, env);
+	const url = new URL(request.url);
+	const segments = url.pathname.split("/");
+	const userId = segments[segments.length - 2];
+	if (!userId) {
+		return apiError(400, "用户 ID 不能为空");
+	}
+
+	if (userId === admin.id) {
+		return apiError(403, "不能修改自己的状态");
+	}
+
+	const body = await readJson<{ status?: string }>(request);
+	const status = body.status === "disabled" ? "disabled" : "active";
+	await updateUserStatus(env.DB, userId, status);
+	return json({ ok: true });
+}
+
+async function handleDeleteUser(request: Request, env: AppEnv): Promise<Response> {
+	const admin = await requireAdmin(request, env);
+	const url = new URL(request.url);
+	const segments = url.pathname.split("/");
+	const userId = segments[segments.length - 1];
+	if (!userId) {
+		return apiError(400, "用户 ID 不能为空");
+	}
+
+	if (userId === admin.id) {
+		return apiError(403, "不能删除自己");
+	}
+
+	await deleteUserAndData(env.DB, userId);
+	return json({ ok: true });
+}
+
 async function requireAuthRecord(
 	request: Request,
 	env: AppEnv,
@@ -488,6 +674,7 @@ async function requireAuthRecord(
 			id: row.user_id,
 			username: row.username,
 			email: row.email,
+			emailVerified: Boolean(row.email_verified),
 		},
 	};
 }
@@ -500,11 +687,15 @@ async function makeSessionResponse(
 	const ttlSeconds = getSessionTtlSeconds(env);
 	const token = await createSession(env.DB, user.id, ttlSeconds);
 	const secure = new URL(request.url).protocol === "https:";
-	const config = await getConfigResponse(request, env, user);
+	const sessionUser = {
+		...user,
+		isAdmin: await isAdmin(env.DB, user.id),
+	};
+	const config = await getConfigResponse(request, env, sessionUser);
 
 	return json(
 		{
-			user,
+			user: sessionUser,
 			config,
 		},
 		{
@@ -648,6 +839,14 @@ function normalizePassword(value: string | undefined): string {
 		throw new HttpError(400, "密码长度需在 8 到 128 位之间");
 	}
 	return password;
+}
+
+function normalizeCode(value: string | undefined): string {
+	const code = (value ?? "").trim();
+	if (!/^\d{6}$/.test(code)) {
+		throw new HttpError(400, "验证码为 6 位数字");
+	}
+	return code;
 }
 
 function clampInteger(value: unknown, min: number, max: number): number {
