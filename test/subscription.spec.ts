@@ -50,7 +50,8 @@ describe("subscription aggregation", () => {
 				{
 					id: "src-a",
 					name: "机场 A",
-					url: "https://a.example.com/sub",
+					v2rayUrl: "https://a.example.com/sub",
+					clashUrl: "",
 					enabled: true,
 					priority: 1,
 					notes: "",
@@ -58,7 +59,8 @@ describe("subscription aggregation", () => {
 				{
 					id: "src-b",
 					name: "机场 B",
-					url: "https://b.example.com/sub",
+					v2rayUrl: "https://b.example.com/sub",
+					clashUrl: "",
 					enabled: true,
 					priority: 2,
 					notes: "",
@@ -190,6 +192,32 @@ describe("subscription aggregation", () => {
 		expect(result.yamlText).toContain("🛑 广告拦截");
 		expect(result.yamlText).toContain("🚀 节点选择");
 		expect(result.yamlText).toContain("RULE-SET,openai,🤖 AI 服务");
+	});
+
+	it("preserves vless reality options in clash yaml", () => {
+		const result = buildClashSubscription([
+			{
+				fingerprint: "reality-1",
+				protocol: "vless",
+				sourceId: "src-a",
+				sourceName: "机场 A",
+				originalName: "Reality 01",
+				finalName: "Reality 01",
+				alias: "",
+				rawUri: "vless://6c2b74b2-ef6e-4524-9ddb-56e48704ebfb@94.159.108.63:38924?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=apple.com&fp=chrome&pbk=HN3NDTLBxoY6uQiQC2brJUd17hqf16INiB59Kv1ZRiA&sid=0a3d1b38#Reality%2001",
+				finalUri:
+					"vless://6c2b74b2-ef6e-4524-9ddb-56e48704ebfb@94.159.108.63:38924?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=apple.com&fp=chrome&pbk=HN3NDTLBxoY6uQiQC2brJUd17hqf16INiB59Kv1ZRiA&sid=0a3d1b38#Reality%2001",
+			},
+		]);
+
+		expect(result.proxyCount).toBe(1);
+		expect(result.yamlText).toContain("type: vless");
+		expect(result.yamlText).toContain("flow: 'xtls-rprx-vision'");
+		expect(result.yamlText).toContain("client-fingerprint: 'chrome'");
+		expect(result.yamlText).toContain("servername: 'apple.com'");
+		expect(result.yamlText).toContain(
+			"reality-opts: { public-key: 'HN3NDTLBxoY6uQiQC2brJUd17hqf16INiB59Kv1ZRiA', short-id: '0a3d1b38' }",
+		);
 	});
 
 	it("ensures duplicate proxy names are uniquified in template output", () => {

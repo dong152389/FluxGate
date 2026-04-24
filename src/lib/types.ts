@@ -48,7 +48,8 @@ export interface SourceRow {
 	id: string;
 	user_id: string;
 	name: string;
-	url_encrypted: string;
+	v2ray_url_encrypted: string | null;
+	clash_url_encrypted: string | null;
 	enabled: number;
 	priority: number;
 	notes: string | null;
@@ -127,7 +128,8 @@ export interface AdminUserListItem {
 export interface SourceConfig {
 	id: string;
 	name: string;
-	url: string;
+	v2rayUrl: string;
+	clashUrl: string;
 	enabled: boolean;
 	priority: number;
 	notes: string;

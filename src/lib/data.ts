@@ -241,7 +241,12 @@ export async function getConfigResponse(
 		sourceRows.map(async (source) => ({
 			id: source.id,
 			name: source.name,
-			url: await decryptText(source.url_encrypted, env),
+			v2rayUrl: source.v2ray_url_encrypted
+				? await decryptText(source.v2ray_url_encrypted, env)
+				: "",
+			clashUrl: source.clash_url_encrypted
+				? await decryptText(source.clash_url_encrypted, env)
+				: "",
 			enabled: Boolean(source.enabled),
 			priority: source.priority,
 			notes: source.notes ?? "",
@@ -322,14 +327,15 @@ export async function saveConfig(
 		await db
 			.prepare(
 				`INSERT INTO sources
-				 (id, user_id, name, url_encrypted, enabled, priority, notes, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 (id, user_id, name, v2ray_url_encrypted, clash_url_encrypted, enabled, priority, notes, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.bind(
 				source.id,
 				userId,
 				source.name,
-				await encryptText(source.url, env),
+				source.v2rayUrl ? await encryptText(source.v2rayUrl, env) : null,
+				source.clashUrl ? await encryptText(source.clashUrl, env) : null,
 				source.enabled ? 1 : 0,
 				source.priority,
 				source.notes,

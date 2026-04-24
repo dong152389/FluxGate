@@ -437,7 +437,8 @@ async function handleTestSource(request: Request, env: AppEnv): Promise<Response
 	const source = sanitizeSource({
 		id: body.id ?? crypto.randomUUID(),
 		name: body.name ?? "未命名来源",
-		url: body.url ?? "",
+		v2rayUrl: body.v2rayUrl ?? "",
+		clashUrl: body.clashUrl ?? "",
 		enabled: body.enabled ?? true,
 		priority: body.priority ?? 0,
 		notes: body.notes ?? "",
@@ -563,7 +564,12 @@ async function handlePublicSubscription(
 		sources: await Promise.all(
 			context.sources.map(async (source) => ({
 				...source,
-				url: await decryptText(source.url_encrypted, env),
+				v2rayUrl: source.v2ray_url_encrypted
+					? await decryptText(source.v2ray_url_encrypted, env)
+					: "",
+				clashUrl: source.clash_url_encrypted
+					? await decryptText(source.clash_url_encrypted, env)
+					: "",
 			})),
 		),
 		renameRules: context.renameRules,
@@ -747,27 +753,47 @@ function sanitizeConfigPayload(input: SaveConfigPayload): SaveConfigPayload {
 	};
 }
 
+function normalizeOptionalSourceUrl(
+	value: string | undefined,
+	name: string,
+	label: "V2Ray" | "Clash/Mihomo",
+): string {
+	const raw = (value || "").trim();
+	if (!raw) {
+		return "";
+	}
+
+	let parsedUrl: URL;
+	try {
+		parsedUrl = new URL(raw);
+	} catch {
+		throw new HttpError(400, `订阅源 ${name} 的 ${label} 链接无效`);
+	}
+
+	if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+		throw new HttpError(400, `订阅源 ${name} 的 ${label} 链接只支持 http/https`);
+	}
+
+	return parsedUrl.toString();
+}
+
 function sanitizeSource(source: SourceConfig): SourceConfig {
 	const name = (source.name || "").trim().slice(0, 80);
 	if (!name) {
 		throw new HttpError(400, "订阅源名称不能为空");
 	}
 
-	let parsedUrl: URL;
-	try {
-		parsedUrl = new URL((source.url || "").trim());
-	} catch {
-		throw new HttpError(400, `订阅源 ${name} 的链接无效`);
-	}
-
-	if (!["http:", "https:"].includes(parsedUrl.protocol)) {
-		throw new HttpError(400, `订阅源 ${name} 只支持 http/https 链接`);
+	const v2rayUrl = normalizeOptionalSourceUrl(source.v2rayUrl, name, "V2Ray");
+	const clashUrl = normalizeOptionalSourceUrl(source.clashUrl, name, "Clash/Mihomo");
+	if (!v2rayUrl && !clashUrl) {
+		throw new HttpError(400, `订阅源 ${name} 至少填写一种订阅链接`);
 	}
 
 	return {
 		id: source.id?.trim() || crypto.randomUUID(),
 		name,
-		url: parsedUrl.toString(),
+		v2rayUrl,
+		clashUrl,
 		enabled: Boolean(source.enabled),
 		priority: clampInteger(source.priority, 0, 999),
 		notes: (source.notes || "").trim().slice(0, 160),

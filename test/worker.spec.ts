@@ -5,7 +5,7 @@ import {
 } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src";
-import { createUser } from "../src/lib/data";
+import { createUser, saveConfig } from "../src/lib/data";
 import { CREATE_SCHEMA_SQL, RESET_SCHEMA_SQL } from "../src/lib/db-schema";
 import { hashPassword } from "../src/lib/security";
 
@@ -36,6 +36,112 @@ async function execStatements(db: D1Database, sql: string): Promise<void> {
 		await db.prepare(`${statement};`).run();
 	}
 }
+
+const LEGACY_SCHEMA_SQL = `
+CREATE TABLE users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  email TEXT,
+  password_hash TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE user_settings (
+  user_id TEXT PRIMARY KEY,
+  public_token TEXT NOT NULL UNIQUE,
+  dedupe_enabled INTEGER NOT NULL DEFAULT 1,
+  prefix_source_name INTEGER NOT NULL DEFAULT 1,
+  source_prefix_template TEXT NOT NULL DEFAULT '[{{source}}] ',
+  keep_unnamed INTEGER NOT NULL DEFAULT 1,
+  sort_mode TEXT NOT NULL DEFAULT 'source-priority',
+  cache_version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE sources (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  url_encrypted TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_sources_user_priority ON sources(user_id, priority, name);
+
+CREATE TABLE rename_rules (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  match_text TEXT,
+  replace_text TEXT,
+  value_text TEXT,
+  rule_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+`;
+
+const DUAL_SOURCE_MIGRATION_SQL = `
+PRAGMA foreign_keys = OFF;
+
+CREATE TABLE sources_new (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  v2ray_url_encrypted TEXT,
+  clash_url_encrypted TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+INSERT INTO sources_new (
+  id,
+  user_id,
+  name,
+  v2ray_url_encrypted,
+  clash_url_encrypted,
+  enabled,
+  priority,
+  notes,
+  created_at,
+  updated_at
+)
+SELECT
+  id,
+  user_id,
+  name,
+  url_encrypted,
+  NULL,
+  enabled,
+  priority,
+  notes,
+  created_at,
+  updated_at
+FROM sources;
+
+DROP TABLE sources;
+ALTER TABLE sources_new RENAME TO sources;
+
+CREATE INDEX IF NOT EXISTS idx_sources_user_priority ON sources(user_id, priority, name);
+
+PRAGMA foreign_keys = ON;
+`;
 
 async function seedVerificationCode(
 	email: string,
@@ -148,8 +254,8 @@ describe("worker auth and config", () => {
 		});
 	});
 
-	it("persists config changes for the authenticated user", async () => {
-		const register = await registerVerifiedUser("operator");
+	it("persists separate v2ray and clash URLs for a source", async () => {
+		const register = await registerVerifiedUser("operator_dual");
 		const cookie = extractCookie(register);
 
 		const save = await invoke("/api/config", {
@@ -170,7 +276,8 @@ describe("worker auth and config", () => {
 					{
 						id: "source-1",
 						name: "机场 A",
-						url: "https://a.example.com/sub",
+						v2rayUrl: "https://a.example.com/v2ray",
+						clashUrl: "https://a.example.com/clash",
 						enabled: true,
 						priority: 1,
 						notes: "主线路",
@@ -193,8 +300,175 @@ describe("worker auth and config", () => {
 		expect(save.status).toBe(200);
 		const savedConfig = await save.json();
 		expect(savedConfig.settings.sortMode).toBe("name");
-		expect(savedConfig.sources[0]?.name).toBe("机场 A");
+		expect(savedConfig.sources[0]).toMatchObject({
+			name: "机场 A",
+			v2rayUrl: "https://a.example.com/v2ray",
+			clashUrl: "https://a.example.com/clash",
+			enabled: true,
+			priority: 1,
+			notes: "主线路",
+		});
 		expect(savedConfig.renameRules[0]?.match).toBe("香港");
+	});
+
+	it("accepts a source when only one upstream URL is provided", async () => {
+		const register = await registerVerifiedUser("operator_single_link");
+		const cookie = extractCookie(register);
+
+		const save = await invoke("/api/config", {
+			method: "PUT",
+			headers: {
+				"content-type": "application/json",
+				Cookie: cookie,
+			},
+			body: JSON.stringify({
+				settings: {
+					dedupeEnabled: true,
+					prefixSourceName: true,
+					sourcePrefixTemplate: "[{{source}}] ",
+					keepUnnamed: true,
+					sortMode: "name",
+				},
+				sources: [
+					{
+						id: "source-1",
+						name: "机场 A",
+						v2rayUrl: "https://a.example.com/v2ray",
+						clashUrl: "",
+						enabled: true,
+						priority: 1,
+						notes: "单链路",
+					},
+				],
+				renameRules: [],
+			}),
+		});
+
+		expect(save.status).toBe(200);
+		const savedConfig = await save.json();
+		expect(savedConfig.sources[0]).toMatchObject({
+			v2rayUrl: "https://a.example.com/v2ray",
+			clashUrl: "",
+		});
+	});
+
+	it("rejects invalid upstream URL protocols", async () => {
+		const register = await registerVerifiedUser("operator_invalid_link");
+		const cookie = extractCookie(register);
+
+		const response = await invoke("/api/config", {
+			method: "PUT",
+			headers: {
+				"content-type": "application/json",
+				Cookie: cookie,
+			},
+			body: JSON.stringify({
+				settings: {
+					dedupeEnabled: true,
+					prefixSourceName: true,
+					sourcePrefixTemplate: "[{{source}}] ",
+					keepUnnamed: true,
+					sortMode: "name",
+				},
+				sources: [
+					{
+						id: "source-1",
+						name: "机场 A",
+						v2rayUrl: "ftp://a.example.com/v2ray",
+						clashUrl: "",
+						enabled: true,
+						priority: 1,
+						notes: "",
+					},
+				],
+				renameRules: [],
+			}),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await response.text()).toContain("V2Ray 链接只支持 http/https");
+	});
+
+	it("migrates legacy sources schema before writing dual upstream URLs", async () => {
+		await execStatements(env.DB, RESET_SCHEMA_SQL);
+		await execStatements(env.DB, LEGACY_SCHEMA_SQL);
+		await execStatements(env.DB, DUAL_SOURCE_MIGRATION_SQL);
+
+		const now = new Date().toISOString();
+		const userId = "legacy-migration-user";
+		await env.DB
+			.prepare(
+				`INSERT INTO users (id, username, email, password_hash, password_salt, status, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.bind(
+				userId,
+				"legacy_migration_user",
+				"legacy_migration_user@example.com",
+				"hash",
+				"salt",
+				"active",
+				now,
+				now,
+			)
+			.run();
+
+		await env.DB
+			.prepare(
+				`INSERT INTO user_settings
+				 (user_id, public_token, dedupe_enabled, prefix_source_name, source_prefix_template, keep_unnamed, sort_mode, cache_version, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.bind(
+				userId,
+				"legacy-public-token",
+				1,
+				1,
+				"[{{source}}] ",
+				1,
+				"source-priority",
+				1,
+				now,
+				now,
+			)
+			.run();
+
+		await saveConfig(env, userId, {
+			settings: {
+				dedupeEnabled: true,
+				prefixSourceName: true,
+				sourcePrefixTemplate: "[{{source}}] ",
+				keepUnnamed: true,
+				sortMode: "source-priority",
+			},
+			sources: [
+				{
+					id: "source-legacy",
+					name: "机场 A",
+					v2rayUrl: "https://a.example.com/v2ray",
+					clashUrl: "https://a.example.com/clash",
+					enabled: true,
+					priority: 1,
+					notes: "",
+				},
+			],
+			renameRules: [],
+		});
+
+		const source = await env.DB
+			.prepare(
+				`SELECT v2ray_url_encrypted, clash_url_encrypted
+				 FROM sources
+				 WHERE user_id = ?`,
+			)
+			.bind(userId)
+			.first<{ v2ray_url_encrypted: string | null; clash_url_encrypted: string | null }>();
+
+		expect(source?.v2ray_url_encrypted).toBeTruthy();
+		expect(source?.clash_url_encrypted).toBeTruthy();
+
+		const columns = await env.DB.prepare("PRAGMA table_info(sources)").all<{ name: string }>();
+		expect((columns.results || []).some((column) => column.name === "url_encrypted")).toBe(false);
 	});
 
 	it("serves a public aggregated subscription", async () => {
@@ -221,7 +495,8 @@ describe("worker auth and config", () => {
 					{
 						id: "source-1",
 						name: "机场 A",
-						url: "https://a.example.com/sub",
+						v2rayUrl: "https://a.example.com/sub",
+						clashUrl: "",
 						enabled: true,
 						priority: 1,
 						notes: "",
@@ -271,7 +546,8 @@ describe("worker auth and config", () => {
 					{
 						id: "source-1",
 						name: "机场 A",
-						url: "https://a.example.com/sub",
+						v2rayUrl: "https://a.example.com/sub",
+						clashUrl: "",
 						enabled: true,
 						priority: 1,
 						notes: "",
@@ -331,7 +607,8 @@ describe("worker auth and config", () => {
 					{
 						id: "source-1",
 						name: "机场 A",
-						url: "https://a.example.com/sub",
+						v2rayUrl: "https://a.example.com/sub",
+						clashUrl: "",
 						enabled: true,
 						priority: 1,
 						notes: "",

@@ -23,7 +23,8 @@ export async function testSingleSource(source: SourceConfig): Promise<{
 	nodeCount: number;
 	nodeNames: string[];
 }> {
-	const payload = await fetchSourcePayload(source.url);
+	const url = source.v2rayUrl || source.clashUrl;
+	const payload = await fetchSourcePayload(url);
 	const nodes = await parseSubscriptionPayload(payload, source);
 	return {
 		nodeCount: nodes.length,
@@ -46,7 +47,7 @@ export async function aggregateSourceConfigs(input: {
 }
 
 export async function aggregateSourceRows(input: {
-	sources: Array<SourceRow & { url: string }>;
+	sources: Array<SourceRow & { v2rayUrl: string; clashUrl: string }>;
 	renameRules: RenameRuleRow[];
 	settings: UserSettingsRow;
 	aliases: Map<string, string>;
@@ -59,7 +60,8 @@ export async function aggregateSourceRows(input: {
 					({
 						id: source.id,
 						name: source.name,
-						url: source.url,
+						v2rayUrl: source.v2rayUrl,
+						clashUrl: source.clashUrl,
 						enabled: Boolean(source.enabled),
 						priority: source.priority,
 						notes: source.notes ?? "",
@@ -103,7 +105,7 @@ async function aggregateInternal(input: {
 
 	for (const source of input.sources) {
 		try {
-			const payload = await fetchSourcePayload(source.url);
+			const payload = await fetchSourcePayload(source.v2rayUrl || source.clashUrl);
 			const nodes = await parseSubscriptionPayload(payload, source);
 			parsedNodes.push(...nodes);
 			sourceSummaries.push({
@@ -683,9 +685,12 @@ function parseVlessToClash(node: PreviewNode): ClashProxy | null {
 		return null;
 	}
 
-	const security = (urlValue.searchParams.get("security") || "").toLowerCase();
-	const tlsEnabled = security === "tls" || security === "reality" || urlValue.searchParams.get("type") === "ws" && urlValue.searchParams.get("security") === "tls";
-	const network = (urlValue.searchParams.get("type") || "tcp").toLowerCase();
+	const security = (firstQuery(urlValue, ["security"]) || "").toLowerCase();
+	const network = (firstQuery(urlValue, ["type", "network"]) || "tcp").toLowerCase();
+	const tlsEnabled =
+		security === "tls" ||
+		security === "reality" ||
+		(network === "ws" && security === "tls");
 
 	const proxy: ClashProxy = {
 		name: node.finalName || server,
@@ -698,29 +703,55 @@ function parseVlessToClash(node: PreviewNode): ClashProxy | null {
 		network: ["tcp", "ws", "grpc", "http", "h2"].includes(network) ? network : "tcp",
 	};
 
-	const flow = urlValue.searchParams.get("flow") || "";
+	const flow = firstQuery(urlValue, ["flow"]) || "";
 	if (flow) {
 		proxy.flow = flow;
 	}
 
-	const clientFingerprint = urlValue.searchParams.get("fp") || "";
+	const clientFingerprint = firstQuery(urlValue, ["fp", "fingerprint"]) || "";
 	if (clientFingerprint) {
 		proxy["client-fingerprint"] = clientFingerprint;
 	}
 
-	const sni = urlValue.searchParams.get("sni") || "";
+	const sni = firstQuery(urlValue, ["sni", "servername", "peer"]) || "";
 	if (sni) {
 		proxy.servername = sni;
 	}
 
-	const alpn = urlValue.searchParams.get("alpn") || "";
-	if (alpn) {
-		proxy.alpn = `[${alpn.split(",").map((item) => `'${escapeYamlSingleQuoted(item.trim())}'`).filter((item) => item !== "''").join(", ")}]`;
+	const alpn = parseCsvList(firstQuery(urlValue, ["alpn"]));
+	if (alpn.length > 0) {
+		proxy.alpn = formatYamlInlineArray(alpn);
+	}
+
+	if (security === "reality") {
+		const publicKey = firstQuery(urlValue, [
+			"pbk",
+			"public-key",
+			"public_key",
+			"publicKey",
+			"pk",
+		]);
+		const shortId = firstQuery(urlValue, [
+			"sid",
+			"short-id",
+			"short_id",
+			"shortid",
+			"shortId",
+		]);
+
+		if (publicKey && shortId) {
+			proxy["reality-opts"] =
+				`{ public-key: '${escapeYamlSingleQuoted(publicKey)}', short-id: '${escapeYamlSingleQuoted(shortId)}' }`;
+		} else if (publicKey) {
+			proxy["reality-opts"] = `{ public-key: '${escapeYamlSingleQuoted(publicKey)}' }`;
+		} else if (shortId) {
+			proxy["reality-opts"] = `{ short-id: '${escapeYamlSingleQuoted(shortId)}' }`;
+		}
 	}
 
 	if (network === "ws") {
-		const path = urlValue.searchParams.get("path") || "";
-		const host = urlValue.searchParams.get("host") || "";
+		const path = firstQuery(urlValue, ["path"]) || "";
+		const host = firstQuery(urlValue, ["host"]) || "";
 		if (path) {
 			proxy["ws-opts"] = `{ path: '${escapeYamlSingleQuoted(path)}'${host ? `, headers: { Host: '${escapeYamlSingleQuoted(host)}' }` : ""} }`;
 		} else if (host) {
@@ -729,7 +760,7 @@ function parseVlessToClash(node: PreviewNode): ClashProxy | null {
 	}
 
 	if (network === "grpc") {
-		const serviceName = urlValue.searchParams.get("serviceName") || urlValue.searchParams.get("service_name") || "";
+		const serviceName = firstQuery(urlValue, ["serviceName", "service_name"]) || "";
 		if (serviceName) {
 			proxy["grpc-opts"] = `{ grpc-service-name: '${escapeYamlSingleQuoted(serviceName)}' }`;
 		}

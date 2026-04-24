@@ -892,8 +892,20 @@ function renderSourceCard(source, index) {
 					</div>
 				</div>
 				<div class="field">
-					<label>订阅链接</label>
-					<input data-source-field="url" value="${escapeAttribute(source.url)}" placeholder="https://example.com/sub" />
+					<label>V2Ray 订阅链接</label>
+					<input
+						data-source-field="v2rayUrl"
+						value="${escapeAttribute(source.v2rayUrl || "")}"
+						placeholder="https://example.com/v2ray-sub"
+					/>
+				</div>
+				<div class="field">
+					<label>Clash / Mihomo 链接</label>
+					<input
+						data-source-field="clashUrl"
+						value="${escapeAttribute(source.clashUrl || "")}"
+						placeholder="https://example.com/clash-sub"
+					/>
 				</div>
 				<div class="input-grid two">
 					<div class="field">
@@ -1129,7 +1141,8 @@ function syncDraftConfig() {
 		state.config.sources = [...sourcesEditor.querySelectorAll("[data-source-id]")].map((card) => ({
 			id: card.dataset.sourceId,
 			name: card.querySelector('[data-source-field="name"]').value,
-			url: card.querySelector('[data-source-field="url"]').value,
+			v2rayUrl: card.querySelector('[data-source-field="v2rayUrl"]').value,
+			clashUrl: card.querySelector('[data-source-field="clashUrl"]').value,
 			enabled: card.querySelector('[data-source-field="enabled"]').checked,
 			priority: Number(card.querySelector('[data-source-field="priority"]').value || 0),
 			notes: card.querySelector('[data-source-field="notes"]').value,
@@ -1341,7 +1354,8 @@ function blankSource() {
 	return {
 		id: crypto.randomUUID(),
 		name: "",
-		url: "",
+		v2rayUrl: "",
+		clashUrl: "",
 		enabled: true,
 		priority: state.config ? state.config.sources.length : 0,
 		notes: "",
