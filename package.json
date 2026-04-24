@@ -1,21 +1,18 @@
 {
   "name": "fluxgate-sub-aggregator",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "start": "wrangler dev",
     "typecheck": "tsc --noEmit",
-    "test": "vitest",
     "db:migrate:local": "wrangler d1 migrations apply fluxgate-db --local",
     "cf-typegen": "wrangler types"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.12.4",
     "@types/node": "^25.6.0",
     "typescript": "^5.5.2",
-    "vitest": "~3.2.0",
     "wrangler": "^4.83.0"
   }
 }

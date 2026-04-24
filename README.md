@@ -89,7 +89,6 @@ npm run deploy
 ```bash
 npm run dev
 npm run typecheck
-npm run test
 npm run cf-typegen
 ```
 
