@@ -1,3 +1,6 @@
+import { actionRequiresConfiguredSession } from "./app-actions.js";
+import { createAuthDraftState, mergeAuthDraft, readAuthDraft } from "./auth-draft.js";
+
 const state = {
 	user: null,
 	config: null,
@@ -9,6 +12,7 @@ const state = {
 	sourceChecks: {},
 	loading: true,
 	adminUsers: null,
+	authDraft: createAuthDraftState(),
 };
 
 const app = document.getElementById("app");
@@ -64,7 +68,7 @@ document.addEventListener("click", async (event) => {
 			return;
 		}
 
-		if (!state.user || !state.config) {
+		if (actionRequiresConfiguredSession(action) && (!state.user || !state.config)) {
 			return;
 		}
 
@@ -360,6 +364,8 @@ document.addEventListener("submit", async (event) => {
 });
 
 function render() {
+	syncAuthDraft();
+
 	if (state.loading) {
 		app.innerHTML = renderLoading();
 		return;
@@ -403,6 +409,7 @@ function renderLoading() {
 
 function renderAuth() {
 	const isRegister = state.authMode === "register";
+	const authDraft = readAuthDraft(state.authDraft, state.authMode);
 	return `
 		<div class="auth-wrap">
 			<div class="auth-card">
@@ -425,26 +432,26 @@ function renderAuth() {
 						${isRegister
 							? `<div class="field">
 									<label for="auth-username">用户名</label>
-									<input id="auth-username" name="username" placeholder="3-32 位字母/数字/._-" autocomplete="username" required />
+									<input id="auth-username" name="username" value="${escapeAttribute(authDraft.username || "")}" placeholder="3-32 位字母/数字/._-" autocomplete="username" required />
 								</div>
 								<div class="field">
 									<label for="auth-email">邮箱</label>
-									<input id="auth-email" name="email" type="email" placeholder="请输入邮箱" autocomplete="email" required />
+									<input id="auth-email" name="email" type="email" value="${escapeAttribute(authDraft.email || "")}" placeholder="请输入邮箱" autocomplete="email" required />
 								</div>
 								<div class="field">
 									<label for="auth-code">验证码</label>
 									<div class="inline-actions">
-										<input id="auth-code" name="code" placeholder="6 位数字" autocomplete="off" required style="flex:1" />
+										<input id="auth-code" name="code" value="${escapeAttribute(authDraft.code || "")}" placeholder="6 位数字" autocomplete="off" required style="flex:1" />
 										<button class="btn btn-secondary btn-small" type="button" data-action="send-code" data-purpose="register">获取验证码</button>
 									</div>
 								</div>`
 							: `<div class="field">
 									<label for="auth-identifier">账号</label>
-									<input id="auth-identifier" name="identifier" placeholder="用户名或邮箱" autocomplete="username" required />
+									<input id="auth-identifier" name="identifier" value="${escapeAttribute(authDraft.identifier || "")}" placeholder="用户名或邮箱" autocomplete="username" required />
 								</div>`}
 						<div class="field">
 							<label for="auth-password">密码</label>
-							<input id="auth-password" name="password" type="password" placeholder="请输入密码" autocomplete="${isRegister ? "new-password" : "current-password"}" required />
+							<input id="auth-password" name="password" type="password" value="${escapeAttribute(authDraft.password || "")}" placeholder="请输入密码" autocomplete="${isRegister ? "new-password" : "current-password"}" required />
 						</div>
 						<button class="btn btn-primary" type="submit">${isRegister ? "创建账号并进入控制台" : "登录控制台"}</button>
 					</form>
@@ -1093,6 +1100,7 @@ async function submitAuth(form) {
 	}
 	state.preview = null;
 	state.sourceChecks = {};
+	state.authDraft = createAuthDraftState();
 	pushNotice(mode === "register" ? "账号已创建，欢迎进入控制台" : "登录成功");
 	render();
 }
@@ -1172,6 +1180,30 @@ function syncDraftConfig() {
 			sortMode: document.getElementById("setting-sort-mode").value,
 		};
 	}
+}
+
+function syncAuthDraft() {
+	const form = app.querySelector('form[data-form="auth"]');
+	if (!form) {
+		return;
+	}
+
+	const mode = form.dataset.mode || "login";
+	const formData = new FormData(form);
+	if (mode === "register") {
+		state.authDraft = mergeAuthDraft(state.authDraft, "register", {
+			username: `${formData.get("username") || ""}`.trim(),
+			email: `${formData.get("email") || ""}`.trim(),
+			code: `${formData.get("code") || ""}`.trim(),
+			password: `${formData.get("password") || ""}`,
+		});
+		return;
+	}
+
+	state.authDraft = mergeAuthDraft(state.authDraft, "login", {
+		identifier: `${formData.get("identifier") || ""}`.trim(),
+		password: `${formData.get("password") || ""}`,
+	});
 }
 
 function syncDraftPreview() {
