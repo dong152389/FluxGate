@@ -42,6 +42,7 @@ import {
 	buildClashSubscription,
 	testSingleSource,
 } from "./lib/subscription";
+import { resolveClashTemplateId } from "./lib/mihomo-template-presets";
 import type {
 	AppEnv,
 	SaveConfigPayload,
@@ -549,13 +550,16 @@ async function handlePublicSubscription(
 	}
 
 	const format = resolvePublicFormat(url, request.headers.get("user-agent"));
-	const cacheKey = `subscription:${context.user.id}:${context.settings.cache_version}:${format}`;
+	const clashTemplateId = format === "clash"
+		? resolvePublicClashTemplate(url, context.settings.clash_template_id)
+		: null;
+	const cacheKey = `subscription:${context.user.id}:${context.settings.cache_version}:${format}:${clashTemplateId ?? "-"}`;
 
 	if (env.CACHE) {
 		const cached = await env.CACHE.get(cacheKey);
 		if (cached !== null) {
 			return new Response(cached, {
-				headers: subscriptionHeaders(format),
+				headers: subscriptionHeaders(format, context.user.username, clashTemplateId),
 			});
 		}
 	}
@@ -581,7 +585,9 @@ async function handlePublicSubscription(
 		return new Response("No upstream subscription available", { status: 502 });
 	}
 
-	const clash = format === "clash" ? buildClashSubscription(aggregate.nodes) : null;
+	const clash = format === "clash"
+		? buildClashSubscription(aggregate.nodes, { templateId: clashTemplateId })
+		: null;
 	const payload = format === "v2ray-raw"
 		? aggregate.rawText
 		: format === "v2ray-base64"
@@ -592,7 +598,7 @@ async function handlePublicSubscription(
 	}
 
 	return new Response(payload, {
-		headers: subscriptionHeaders(format, context.user.username),
+		headers: subscriptionHeaders(format, context.user.username, clashTemplateId),
 	});
 }
 
@@ -747,6 +753,7 @@ function sanitizeConfigPayload(input: SaveConfigPayload): SaveConfigPayload {
 			sourcePrefixTemplate: prefixTemplate,
 			keepUnnamed: Boolean(settings.keepUnnamed),
 			sortMode: settings.sortMode === "name" ? "name" : "source-priority",
+			clashTemplateId: resolveClashTemplateId(settings.clashTemplateId),
 		},
 		sources,
 		renameRules,
@@ -909,16 +916,26 @@ function resolvePublicFormat(url: URL, userAgent: string | null): PublicFormat {
 	return "v2ray-base64";
 }
 
+function resolvePublicClashTemplate(
+	url: URL,
+	defaultTemplateId: string | null | undefined,
+): string {
+	const explicit = (url.searchParams.get("template") || url.searchParams.get("tpl") || "").trim();
+	return explicit ? resolveClashTemplateId(explicit) : resolveClashTemplateId(defaultTemplateId);
+}
+
 function subscriptionHeaders(
 	format: PublicFormat,
 	username?: string,
+	clashTemplateId?: string | null,
 ): HeadersInit {
-	const profileTitle = buildProfileTitle(format, username);
+	const profileTitle = buildProfileTitle(format, username, clashTemplateId);
 	if (format === "clash") {
 		return {
 			"content-type": "text/yaml; charset=UTF-8",
 			"cache-control": "no-store",
 			"x-subscription-format": "clash",
+			"x-clash-template": resolveClashTemplateId(clashTemplateId),
 			"profile-title": profileTitle,
 			"content-disposition": `attachment; filename="${encodeFileName(profileTitle)}.yaml"`,
 		};
@@ -933,10 +950,15 @@ function subscriptionHeaders(
 	};
 }
 
-function buildProfileTitle(format: PublicFormat, username?: string): string {
+function buildProfileTitle(
+	format: PublicFormat,
+	username?: string,
+	clashTemplateId?: string | null,
+): string {
 	const cleaned = (username || "user").replace(/[\r\n"]/g, "").trim() || "user";
 	if (format === "clash") {
-		return `FluxGate-${cleaned}-clash`;
+		const template = resolveClashTemplateId(clashTemplateId);
+		return `FluxGate-${cleaned}-clash-${template}`;
 	}
 	if (format === "v2ray-raw") {
 		return `FluxGate-${cleaned}-raw`;

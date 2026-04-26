@@ -39,6 +39,7 @@ export interface UserSettingsRow {
 	source_prefix_template: string;
 	keep_unnamed: number;
 	sort_mode: SortMode;
+	clash_template_id?: string | null;
 	cache_version: number;
 	created_at: string;
 	updated_at: string;
@@ -151,6 +152,17 @@ export interface UserSettingsConfig {
 	sourcePrefixTemplate: string;
 	keepUnnamed: boolean;
 	sortMode: SortMode;
+	clashTemplateId: string;
+}
+
+export interface ClashTemplateLink {
+	id: string;
+	label: string;
+	shortLabel: string;
+	category: "fixed";
+	description: string;
+	url: string;
+	isDefault: boolean;
 }
 
 export interface AggregationConfigResponse {
@@ -162,6 +174,7 @@ export interface AggregationConfigResponse {
 		clash: string;
 		raw: string;
 	};
+	clashTemplates: ClashTemplateLink[];
 	settings: UserSettingsConfig;
 	sources: SourceConfig[];
 	renameRules: RenameRuleConfig[];

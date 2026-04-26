@@ -33,11 +33,15 @@ export function buildPublicClientUrl(
 	env: AppEnv,
 	publicToken: string,
 	format: "clash" | "raw",
+	clashTemplateId?: string,
 ): string {
 	const base = buildPublicUrl(request, env, publicToken);
 	const target = new URL(base);
 	if (format === "clash") {
 		target.searchParams.set("format", "clash");
+		if (clashTemplateId) {
+			target.searchParams.set("template", clashTemplateId);
+		}
 	} else {
 		target.searchParams.set("raw", "1");
 	}

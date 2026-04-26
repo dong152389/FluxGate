@@ -7,6 +7,10 @@ import {
 	randomId,
 	randomToken,
 } from "./security";
+import {
+	listClashTemplatePresets,
+	resolveClashTemplateId,
+} from "./mihomo-template-presets";
 import type {
 	AdminUserListItem,
 	AppEnv,
@@ -266,6 +270,17 @@ export async function getConfigResponse(
 			}) satisfies RenameRuleConfig,
 	);
 
+	const selectedTemplateId = resolveClashTemplateId(settings.clash_template_id);
+	const clashTemplates = listClashTemplatePresets().map((preset) => ({
+		id: preset.id,
+		label: preset.label,
+		shortLabel: preset.shortLabel,
+		category: preset.category,
+		description: preset.description,
+		url: buildPublicClientUrl(request, env, settings.public_token, "clash", preset.id),
+		isDefault: preset.id === selectedTemplateId,
+	}));
+
 	return {
 		user,
 		publicToken: settings.public_token,
@@ -275,6 +290,7 @@ export async function getConfigResponse(
 			clash: buildPublicClientUrl(request, env, settings.public_token, "clash"),
 			raw: buildPublicClientUrl(request, env, settings.public_token, "raw"),
 		},
+		clashTemplates,
 		settings: settingsRowToConfig(settings),
 		sources,
 		renameRules,
@@ -288,6 +304,7 @@ export function settingsRowToConfig(settings: UserSettingsRow): UserSettingsConf
 		sourcePrefixTemplate: settings.source_prefix_template,
 		keepUnnamed: Boolean(settings.keep_unnamed),
 		sortMode: settings.sort_mode,
+		clashTemplateId: resolveClashTemplateId(settings.clash_template_id),
 	};
 }
 
@@ -307,6 +324,7 @@ export async function saveConfig(
 			     source_prefix_template = ?,
 			     keep_unnamed = ?,
 			     sort_mode = ?,
+			     clash_template_id = ?,
 			     cache_version = cache_version + 1,
 			     updated_at = ?
 			 WHERE user_id = ?`,
@@ -317,6 +335,7 @@ export async function saveConfig(
 			payload.settings.sourcePrefixTemplate,
 			payload.settings.keepUnnamed ? 1 : 0,
 			payload.settings.sortMode,
+			resolveClashTemplateId(payload.settings.clashTemplateId),
 			timestamp,
 			userId,
 		)

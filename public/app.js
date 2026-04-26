@@ -13,6 +13,12 @@ const state = {
 	loading: true,
 	adminUsers: null,
 	authDraft: createAuthDraftState(),
+	templatePreview: {
+		selectedTemplateId: null,
+		loading: false,
+		error: null,
+		summary: null,
+	},
 };
 
 const app = document.getElementById("app");
@@ -27,6 +33,8 @@ async function boot() {
 		state.user = me.user;
 		if (state.user?.emailVerified || state.user?.isAdmin) {
 			state.config = await api("/api/config");
+			ensureConfigTemplateSetting(state.config);
+			resetTemplatePreview();
 		}
 	} catch (error) {
 		if (error.status !== 401 && error.status !== 403) {
@@ -79,6 +87,15 @@ document.addEventListener("click", async (event) => {
 			state.activeView = button.dataset.view || "overview";
 			if (state.activeView === "admin") {
 				loadAdminUsers();
+			}
+			if (state.activeView === "templates") {
+				const templates = resolveClashTemplates(state.config);
+				ensureTemplateSelection(templates);
+				render();
+				if (!state.templatePreview.summary) {
+					await loadTemplatePreview(state.templatePreview.selectedTemplateId, { silentNotice: true });
+				}
+				return;
 			}
 			render();
 			return;
@@ -146,6 +163,39 @@ document.addEventListener("click", async (event) => {
 			return;
 		}
 
+		if (action === "copy-template-url") {
+			const templateId = (button.dataset.templateId || "").trim();
+			if (!templateId) {
+				pushNotice("模板 ID 缺失", true);
+				return;
+			}
+			const template = resolveClashTemplates(state.config).find((item) => item.id === templateId);
+			if (!template?.url) {
+				pushNotice("模板链接不存在", true);
+				return;
+			}
+			await copyText(template.url, `${template.shortLabel || template.label} 链接已复制`);
+			return;
+		}
+
+		if (action === "preview-template") {
+			await withBusy(button, "生成中...", async () => {
+				const templateId = (state.templatePreview.selectedTemplateId || "").trim();
+				await loadTemplatePreview(templateId);
+			});
+			return;
+		}
+
+		if (action === "copy-template-yaml") {
+			const summary = state.templatePreview.summary;
+			if (!summary?.yamlText) {
+				pushNotice("请先生成模板预览", false, "warn");
+				return;
+			}
+			await copyText(summary.yamlText, "模板 YAML 已复制");
+			return;
+		}
+
 		if (action === "copy-raw-output") {
 			if (!state.preview) {
 				pushNotice("请先生成预览", false, "warn");
@@ -188,6 +238,11 @@ document.addEventListener("click", async (event) => {
 					clash: `${result.publicUrl}?format=clash`,
 					raw: `${result.publicUrl}?raw=1`,
 				};
+				state.config.clashTemplates = resolveClashTemplates(state.config).map((item) => ({
+					...item,
+					url: buildClashTemplateUrl(result.publicUrl, item.id),
+				}));
+				resetTemplatePreview();
 				pushNotice("缓存版本已刷新，新的拉取会重新聚合");
 				render();
 			});
@@ -205,6 +260,11 @@ document.addEventListener("click", async (event) => {
 					clash: `${result.publicUrl}?format=clash`,
 					raw: `${result.publicUrl}?raw=1`,
 				};
+				state.config.clashTemplates = resolveClashTemplates(state.config).map((item) => ({
+					...item,
+					url: buildClashTemplateUrl(result.publicUrl, item.id),
+				}));
+				resetTemplatePreview();
 				pushNotice("公开订阅 token 已重置，旧链接已失效");
 				render();
 			});
@@ -220,6 +280,8 @@ document.addEventListener("click", async (event) => {
 				state.sourceChecks = {};
 				state.activeView = "overview";
 				state.adminUsers = null;
+				state.templatePreview.selectedTemplateId = null;
+				resetTemplatePreview();
 				pushNotice("已退出登录");
 				render();
 			});
@@ -360,6 +422,23 @@ document.addEventListener("submit", async (event) => {
 	} catch (error) {
 		pushNotice(error.message || "提交失败", true);
 		render();
+	}
+});
+
+document.addEventListener("change", async (event) => {
+	const target = event.target;
+	if (!(target instanceof HTMLInputElement)) {
+		return;
+	}
+
+	if (target.matches('[data-template-select]')) {
+		state.templatePreview.selectedTemplateId = target.value;
+		if (state.config?.settings) {
+			state.config.settings.clashTemplateId = target.value;
+		}
+		state.templatePreview.error = null;
+		render();
+		await loadTemplatePreview(target.value, { silentNotice: true });
 	}
 });
 
@@ -509,6 +588,7 @@ const NAV_ITEMS = [
 	{ id: "overview", label: "概览", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><rect x="2" y="2" width="5.5" height="5.5" rx="1.2"/><rect x="8.5" y="2" width="5.5" height="5.5" rx="1.2"/><rect x="2" y="8.5" width="5.5" height="5.5" rx="1.2"/><rect x="8.5" y="8.5" width="5.5" height="5.5" rx="1.2"/></svg>` },
 	{ id: "sources", label: "订阅源", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none"/><path d="M4 4.5a5 5 0 0 0 0 7M12 4.5a5 5 0 0 1 0 7"/><path d="M2 2.5a8 8 0 0 0 0 11M14 2.5a8 8 0 0 1 0 11"/></svg>` },
 	{ id: "rules", label: "聚合规则", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><path d="M2 4h12M2 8h12M2 12h12"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/><circle cx="11" cy="8" r="1.4" fill="currentColor"/><circle cx="5" cy="12" r="1.4" fill="currentColor"/></svg>` },
+	{ id: "templates", label: "模板中心", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 5h6M5 8h6M5 11h4"/></svg>` },
 	{ id: "preview", label: "节点预览", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><path d="M1.5 8C4 3.5 12 3.5 14.5 8c-2.5 4.5-10.5 4.5-13 0z"/><circle cx="8" cy="8" r="2"/></svg>` },
 	{ id: "account", label: "账号安全", icon: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="16" height="16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3 14c0-3.5 10-3.5 10 0"/></svg>` },
 ];
@@ -575,6 +655,7 @@ function renderSidebar(activeView) {
 function renderWorkspace(view) {
 	if (view === "sources") return renderSourcesView();
 	if (view === "rules") return renderRulesView();
+	if (view === "templates") return renderTemplatesView();
 	if (view === "preview") return renderPreviewView();
 	if (view === "account") return renderAccountView();
 	if (view === "admin") return renderAdminView();
@@ -725,6 +806,122 @@ function renderRulesView() {
 					`}
 				</div>
 			</section>
+		</div>
+	`;
+}
+
+function renderTemplatesView() {
+	const templates = resolveClashTemplates(state.config);
+	const selectedTemplateId = ensureTemplateSelection(templates);
+	const selectedTemplate = templates.find((item) => item.id === selectedTemplateId) || templates[0] || null;
+	const summary = state.templatePreview.summary && state.templatePreview.summary.templateId === selectedTemplateId
+		? state.templatePreview.summary
+		: null;
+	const metrics = summary?.metrics || null;
+	const groups = summary?.groups || [];
+	const actions = `
+		<button class="btn btn-primary btn-small" data-action="preview-template">生成预览</button>
+		<button class="btn btn-secondary btn-small" data-action="save-config">保存模板</button>
+		<button class="btn btn-secondary btn-small" data-action="copy-template-url" data-template-id="${escapeAttribute(selectedTemplate?.id || "")}">复制模板链接</button>
+		<button class="btn btn-ghost btn-small" data-action="copy-template-yaml">复制 YAML</button>
+	`;
+
+	return `
+		${renderWorkspaceHead("FluxGate · 模板", "Clash/Mihomo 模板", "固定模板分为精简版、标准版、完整版，且可直接预览分组效果", actions)}
+		<div class="workspace-body">
+			<div class="template-layout">
+				<section class="card template-layout-left">
+					<div class="card-head">
+						<h3>选择模板</h3>
+						<p>只保留固定模板；选择后先预览，再点“保存模板”即可生效到导入。</p>
+					</div>
+					<div class="section-list template-option-list">
+						${templates.length
+							? templates.map((template) => `
+								<label class="item-card template-option ${template.id === selectedTemplateId ? "active" : ""}">
+									<div class="inline-actions" style="justify-content:space-between;align-items:flex-start;">
+										<div class="template-option-head">
+											<input
+												type="radio"
+												name="template-select"
+												data-template-select
+												value="${escapeAttribute(template.id)}"
+												${template.id === selectedTemplateId ? "checked" : ""}
+											/>
+											<div>
+												<strong>${escapeHtml(template.shortLabel || template.label)}</strong>
+												<div class="muted">${escapeHtml(template.label)}</div>
+											</div>
+										</div>
+										<div class="inline-actions">
+											<span class="badge ok">固定</span>
+											${template.isDefault ? `<span class="badge ok">默认</span>` : ""}
+										</div>
+									</div>
+									<div class="muted">${escapeHtml(template.description || "")}</div>
+								</label>
+							`).join("")
+							: `<div class="empty-state">当前没有可用模板。</div>`}
+					</div>
+				</section>
+				<section class="card template-layout-right">
+					<div class="card-head">
+						<h3>模板预览</h3>
+						<p>${selectedTemplate ? `当前模板：${escapeHtml(selectedTemplate.label)}` : "请选择模板"}</p>
+					</div>
+					${state.templatePreview.loading
+						? `<div class="empty-state">正在生成预览，请稍候...</div>`
+						: state.templatePreview.error
+							? `<div class="empty-state">${escapeHtml(state.templatePreview.error)}</div>`
+							: !summary
+								? `<div class="empty-state">点击“生成预览”查看该模板的节点、代理组和规则统计。</div>`
+								: `
+									<div class="metrics-row template-metrics">
+										<div class="metric-card">
+											<small>节点</small>
+											<strong>${metrics.nodeCount}</strong>
+											<span class="muted">可用代理节点</span>
+										</div>
+										<div class="metric-card">
+											<small>代理组</small>
+											<strong>${metrics.groupCount}</strong>
+											<span class="muted">策略分组总数</span>
+										</div>
+										<div class="metric-card">
+											<small>规则集</small>
+											<strong>${metrics.ruleProviderCount}</strong>
+											<span class="muted">rule-providers</span>
+										</div>
+									</div>
+									<div style="overflow-x:auto;">
+										<table class="preview-table">
+											<thead>
+												<tr>
+													<th>代理组</th>
+													<th>类型</th>
+													<th>默认</th>
+													<th>候选数</th>
+												</tr>
+											</thead>
+											<tbody>
+												${groups.map((group) => `
+													<tr>
+														<td>${escapeHtml(group.name)}</td>
+														<td>${escapeHtml(group.type || "select")}</td>
+														<td>${escapeHtml(group.defaultProxy || "-")}</td>
+														<td>${group.proxyCount}</td>
+													</tr>
+												`).join("")}
+												${groups.length === 0 ? `<tr><td colspan="4" style="text-align:center;color:var(--muted)">未解析到代理组</td></tr>` : ""}
+											</tbody>
+										</table>
+									</div>
+									<div class="code-block">${escapeHtml(summary.yamlSnippet)}</div>
+									<p class="footer-note">上方展示的是模板 YAML 片段，完整内容可点“复制 YAML”。</p>
+								`
+					}
+				</section>
+			</div>
 		</div>
 	`;
 }
@@ -1095,9 +1292,11 @@ async function submitAuth(form) {
 		isAdmin: responseUser.isAdmin ?? configUser.isAdmin ?? false,
 	};
 	state.config = response.config;
+	ensureConfigTemplateSetting(state.config);
 	if (state.config && !state.config.publicUrls) {
 		state.config.publicUrls = resolvePublicUrls(state.config);
 	}
+	resetTemplatePreview();
 	state.preview = null;
 	state.sourceChecks = {};
 	state.authDraft = createAuthDraftState();
@@ -1178,6 +1377,7 @@ function syncDraftConfig() {
 			sourcePrefixTemplate: document.getElementById("setting-prefix-template").value,
 			keepUnnamed: document.getElementById("setting-keep-unnamed").checked,
 			sortMode: document.getElementById("setting-sort-mode").value,
+			clashTemplateId: state.config.settings?.clashTemplateId || "fixed-full",
 		};
 	}
 }
@@ -1251,9 +1451,11 @@ async function saveConfig() {
 		}),
 	});
 	state.config = response;
+	ensureConfigTemplateSetting(state.config);
 	if (state.config && !state.config.publicUrls) {
 		state.config.publicUrls = resolvePublicUrls(state.config);
 	}
+	resetTemplatePreview();
 	state.preview = null;
 	pushNotice("配置已保存");
 	render();
@@ -1580,6 +1782,235 @@ function startCodeCountdown(button) {
 	}, 1000);
 }
 
+function ensureConfigTemplateSetting(config) {
+	if (!config?.settings) {
+		return;
+	}
+
+	const templates = Array.isArray(config.clashTemplates) ? config.clashTemplates : [];
+	const selected = templates.find((item) => item.isDefault)?.id || "fixed-full";
+	if (!config.settings.clashTemplateId) {
+		config.settings.clashTemplateId = selected;
+	}
+}
+
+function ensureTemplateSelection(templates) {
+	if (!templates.length) {
+		state.templatePreview.selectedTemplateId = null;
+		return null;
+	}
+
+	const selected = state.templatePreview.selectedTemplateId;
+	if (selected && templates.some((item) => item.id === selected)) {
+		return selected;
+	}
+
+	const fallback = templates.find((item) => item.isDefault)?.id || templates[0].id;
+	state.templatePreview.selectedTemplateId = fallback;
+	return fallback;
+}
+
+function resetTemplatePreview() {
+	state.templatePreview.loading = false;
+	state.templatePreview.error = null;
+	state.templatePreview.summary = null;
+}
+
+async function loadTemplatePreview(templateId, options = {}) {
+	const { silentNotice = false } = options;
+	const templates = resolveClashTemplates(state.config);
+	const selected = templateId || ensureTemplateSelection(templates);
+	const template = templates.find((item) => item.id === selected);
+	if (!template?.url) {
+		state.templatePreview.error = "模板链接不存在，请先保存配置后重试。";
+		state.templatePreview.loading = false;
+		state.templatePreview.summary = null;
+		render();
+		return;
+	}
+
+	state.templatePreview.selectedTemplateId = template.id;
+	state.templatePreview.loading = true;
+	state.templatePreview.error = null;
+	render();
+
+	try {
+		const response = await fetch(template.url, {
+			method: "GET",
+			credentials: "same-origin",
+			headers: { accept: "text/yaml, text/plain, */*" },
+		});
+		if (!response.ok) {
+			const message = await response.text();
+			throw new Error(message || `模板预览失败（${response.status}）`);
+		}
+
+		const yamlText = await response.text();
+		state.templatePreview.summary = parseTemplateYamlSummary(yamlText, template.id);
+		state.templatePreview.error = null;
+		if (!silentNotice) {
+			pushNotice(`模板预览已生成：${template.shortLabel || template.label}`);
+		}
+	} catch (error) {
+		state.templatePreview.summary = null;
+		state.templatePreview.error = error?.message || "模板预览失败";
+		if (!silentNotice) {
+			pushNotice(state.templatePreview.error, true);
+		}
+	} finally {
+		state.templatePreview.loading = false;
+		render();
+	}
+}
+
+function parseTemplateYamlSummary(yamlText, templateId) {
+	const proxiesSection = readYamlSection(yamlText, "proxies", "proxy-groups");
+	const groupsSection = readYamlSection(yamlText, "proxy-groups", "rule-providers");
+	const providersSection = readYamlSection(yamlText, "rule-providers", "rules");
+	const rulesSection = readYamlSection(yamlText, "rules", null);
+
+	const groups = parseTemplateProxyGroups(groupsSection);
+	const nodeCount = countYamlListItems(proxiesSection, 2);
+	const ruleProviderCount = countYamlMappings(providersSection, 2);
+	const ruleCount = countYamlListItems(rulesSection, 2);
+	const snippet = yamlText.length > 3200
+		? `${yamlText.slice(0, 3200)}\n\n# ... 预览截断，复制可获取完整 YAML`
+		: yamlText;
+
+	return {
+		templateId,
+		yamlText,
+		yamlSnippet: snippet,
+		metrics: {
+			nodeCount,
+			groupCount: groups.length,
+			ruleProviderCount,
+			ruleCount,
+		},
+		groups,
+	};
+}
+
+function readYamlSection(yamlText, startKey, endKey) {
+	const startRegex = new RegExp(`^${escapeRegex(startKey)}:\\r?\\n`, "m");
+	const startMatch = startRegex.exec(yamlText);
+	if (!startMatch) {
+		return "";
+	}
+
+	const startIndex = startMatch.index + startMatch[0].length;
+	if (!endKey) {
+		return yamlText.slice(startIndex);
+	}
+
+	const endRegex = new RegExp(`^${escapeRegex(endKey)}:\\r?\\n`, "m");
+	endRegex.lastIndex = startIndex;
+	const sliced = yamlText.slice(startIndex);
+	const endMatch = endRegex.exec(sliced);
+	if (!endMatch) {
+		return sliced;
+	}
+
+	return sliced.slice(0, endMatch.index);
+}
+
+function countYamlListItems(sectionText, indentSpaces) {
+	if (!sectionText) {
+		return 0;
+	}
+	const regex = new RegExp(`^\\s{${indentSpaces}}-\\s`, "gm");
+	return [...sectionText.matchAll(regex)].length;
+}
+
+function countYamlMappings(sectionText, indentSpaces) {
+	if (!sectionText) {
+		return 0;
+	}
+	const regex = new RegExp(`^\\s{${indentSpaces}}[^\\s#][^:]*:\\s`, "gm");
+	return [...sectionText.matchAll(regex)].length;
+}
+
+function parseTemplateProxyGroups(sectionText) {
+	if (!sectionText) {
+		return [];
+	}
+
+	const lines = sectionText.split(/\r?\n/);
+	const groups = [];
+	let current = null;
+	let readingProxyList = false;
+
+	for (const rawLine of lines) {
+		const line = rawLine.trimEnd();
+		const nameMatch = line.match(/^\s{2}-\sname:\s(.+)$/);
+		if (nameMatch) {
+			if (current) {
+				groups.push(current);
+			}
+			current = {
+				name: normalizeYamlValue(nameMatch[1]),
+				type: "select",
+				defaultProxy: "-",
+				proxyCount: 0,
+			};
+			readingProxyList = false;
+			continue;
+		}
+
+		if (!current) {
+			continue;
+		}
+
+		const typeMatch = line.match(/^\s{4}type:\s(.+)$/);
+		if (typeMatch) {
+			current.type = normalizeYamlValue(typeMatch[1]);
+			continue;
+		}
+
+		if (/^\s{4}proxies:\s*$/.test(line)) {
+			readingProxyList = true;
+			continue;
+		}
+
+		if (readingProxyList) {
+			const proxyMatch = line.match(/^\s{6}-\s(.+)$/);
+			if (proxyMatch) {
+				const option = normalizeYamlValue(proxyMatch[1]);
+				current.proxyCount += 1;
+				if (current.defaultProxy === "-") {
+					current.defaultProxy = option;
+				}
+				continue;
+			}
+
+			if (/^\s{2}-\sname:/.test(line)) {
+				readingProxyList = false;
+			}
+		}
+	}
+
+	if (current) {
+		groups.push(current);
+	}
+
+	return groups;
+}
+
+function normalizeYamlValue(value) {
+	const trimmed = `${value || ""}`.trim();
+	if (
+		(trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+		(trimmed.startsWith("\"") && trimmed.endsWith("\""))
+	) {
+		return trimmed.slice(1, -1);
+	}
+	return trimmed;
+}
+
+function escapeRegex(value) {
+	return `${value}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function resolvePublicUrls(config) {
 	const base = config?.publicUrl || "";
 	const urls = config?.publicUrls || {};
@@ -1588,4 +2019,40 @@ function resolvePublicUrls(config) {
 		clash: urls.clash || (base ? `${base}?format=clash` : ""),
 		raw: urls.raw || (base ? `${base}?raw=1` : ""),
 	};
+}
+
+function resolveClashTemplates(config) {
+	const templates = Array.isArray(config?.clashTemplates) ? config.clashTemplates : [];
+	const base = config?.publicUrl || "";
+	if (!templates.length) {
+		return [{
+			id: "fixed-full",
+			label: "固定模板 · 完整版",
+			shortLabel: "完整版",
+			category: "fixed",
+			description: "兼容旧配置的默认模板链接。",
+			url: buildClashTemplateUrl(base, "fixed-full"),
+			isDefault: true,
+		}];
+	}
+
+	return templates.map((item) => ({
+		...item,
+		url: buildClashTemplateUrl(base, item.id || "fixed-full"),
+	}));
+}
+
+function buildClashTemplateUrl(baseUrl, templateId) {
+	if (!baseUrl) {
+		return "";
+	}
+	try {
+		const target = new URL(baseUrl, window.location.origin);
+		target.searchParams.set("format", "clash");
+		target.searchParams.set("template", `${templateId || "fixed-full"}`);
+		return target.toString();
+	} catch {
+		const suffix = `${baseUrl}`.includes("?") ? "&" : "?";
+		return `${baseUrl}${suffix}format=clash&template=${encodeURIComponent(templateId || "fixed-full")}`;
+	}
 }

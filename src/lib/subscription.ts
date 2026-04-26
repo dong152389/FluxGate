@@ -1,9 +1,9 @@
 import { tryDecodeBase64Text, utf8ToBase64 } from "./encoding";
 import {
-	MIHOMO_TEMPLATE,
 	MIHOMO_TEMPLATE_GROUPS_PLACEHOLDER,
 	MIHOMO_TEMPLATE_PROXY_PLACEHOLDER,
 } from "./mihomo-template";
+import { getClashTemplatePreset, resolveClashTemplateId } from "./mihomo-template-presets";
 import { sha256Base64Url } from "./security";
 import type {
 	AggregateResult,
@@ -89,6 +89,7 @@ export async function aggregateSourceRows(input: {
 			sourcePrefixTemplate: input.settings.source_prefix_template,
 			keepUnnamed: Boolean(input.settings.keep_unnamed),
 			sortMode: input.settings.sort_mode,
+			clashTemplateId: resolveClashTemplateId(input.settings.clash_template_id),
 		},
 		aliases: input.aliases,
 	});
@@ -432,7 +433,11 @@ function decodeHashName(hash: string): string {
 
 type ClashProxy = Record<string, string | number | boolean>;
 
-export function buildClashSubscription(nodes: PreviewNode[]): ClashBuildResult {
+export function buildClashSubscription(
+	nodes: PreviewNode[],
+	options: { templateId?: string | null } = {},
+): ClashBuildResult {
+	const preset = getClashTemplatePreset(options.templateId);
 	const proxies: ClashProxy[] = [];
 	for (const node of nodes) {
 		const parsed = parseClashProxy(node);
@@ -446,8 +451,12 @@ export function buildClashSubscription(nodes: PreviewNode[]): ClashBuildResult {
 		.map((proxy) => String(proxy.name))
 		.filter((value) => value.length > 0);
 	const proxySection = renderClashProxySection(proxies);
-	const proxyGroupsSection = renderClashProxyGroups(names);
-	const yamlText = MIHOMO_TEMPLATE
+	const proxyGroupsSection = renderClashProxyGroups(
+		names,
+		preset.policyGroups,
+		preset.includeAutoSelect,
+	);
+	const yamlText = preset.yamlTemplate
 		.replace(MIHOMO_TEMPLATE_PROXY_PLACEHOLDER, proxySection)
 		.replace(MIHOMO_TEMPLATE_GROUPS_PLACEHOLDER, proxyGroupsSection);
 
@@ -457,40 +466,6 @@ export function buildClashSubscription(nodes: PreviewNode[]): ClashBuildResult {
 		skippedCount: Math.max(nodes.length - proxies.length, 0),
 	};
 }
-
-const CLASH_POLICY_GROUPS = [
-	"🛑 广告拦截",
-	"🤖 AI 服务",
-	"📹 油管视频",
-	"📚 教育学术",
-	"☁️ 云服务",
-	"🔍 谷歌服务",
-	"🏠 私有网络",
-	"🔒 国内服务",
-	"📲 电报消息",
-	"🐱 代码托管",
-	"Ⓜ️ 微软服务",
-	"📺 欧美流媒体",
-	"🍏 苹果服务",
-	"🐦 推特/X",
-	"📘 Meta 系",
-	"🎙️ Discord",
-	"💬 其他社交",
-	"🎬 奈飞",
-	"🏰 迪士尼+",
-	"🎌 亚洲流媒体",
-	"🎮 Steam",
-	"🖥️ PC 游戏",
-	"🎯 主机游戏",
-	"🛠️ 开发工具",
-	"💾 网盘存储",
-	"💳 支付平台",
-	"₿ 加密货币",
-	"📰 新闻资讯",
-	"🛒 海淘购物",
-	"🌍 非中国",
-	"🐟 漏网之鱼",
-];
 
 function renderClashProxySection(proxies: ClashProxy[]): string {
 	if (proxies.length === 0) {
@@ -513,24 +488,68 @@ function renderClashProxySection(proxies: ClashProxy[]): string {
 	return lines.join("\n");
 }
 
-function renderClashProxyGroups(proxyNames: string[]): string {
+function renderClashProxyGroups(
+	proxyNames: string[],
+	policyGroups: string[],
+	includeAutoSelect: boolean,
+): string {
 	const normalizedNames = proxyNames.length > 0 ? proxyNames : ["DIRECT"];
 	const lines: string[] = [];
 
-	lines.push(...renderProxyGroup("🚀 节点选择", ["DIRECT", ...normalizedNames]));
-	for (const name of CLASH_POLICY_GROUPS) {
+	if (includeAutoSelect) {
+		lines.push(...renderAutoProxyGroup(normalizedNames));
+		lines.push(
+			...renderProxyGroup("🚀 节点选择", [
+				"⚡ 自动选择",
+				"DIRECT",
+				"REJECT",
+				...normalizedNames,
+			]),
+		);
+	} else {
+		lines.push(...renderProxyGroup("🚀 节点选择", ["DIRECT", ...normalizedNames]));
+	}
+
+	for (const name of policyGroups) {
 		if (name === "🛑 广告拦截") {
 			lines.push(...renderProxyGroup(name, ["REJECT", "DIRECT", "🚀 节点选择"]));
 			continue;
 		}
 		if (name === "🏠 私有网络" || name === "🔒 国内服务") {
-			lines.push(...renderProxyGroup(name, ["DIRECT", "🚀 节点选择"]));
+			lines.push(
+				...renderProxyGroup(
+					name,
+					includeAutoSelect
+						? ["DIRECT", "REJECT", "🚀 节点选择", "⚡ 自动选择", ...normalizedNames]
+						: ["DIRECT", "🚀 节点选择"],
+				),
+			);
 			continue;
 		}
-		lines.push(...renderProxyGroup(name, ["🚀 节点选择", "DIRECT"]));
+		lines.push(
+			...renderProxyGroup(
+				name,
+				includeAutoSelect
+					? ["🚀 节点选择", "⚡ 自动选择", "DIRECT", "REJECT", ...normalizedNames]
+					: ["🚀 节点选择", "DIRECT"],
+			),
+		);
 	}
 
 	return lines.join("\n");
+}
+
+function renderAutoProxyGroup(proxyNames: string[]): string[] {
+	const deduped = Array.from(new Set(proxyNames.filter((value) => value.trim().length > 0)));
+	return [
+		`  - name: '${escapeYamlSingleQuoted("⚡ 自动选择")}'`,
+		"    type: url-test",
+		"    proxies:",
+		...deduped.map((value) => `      - '${escapeYamlSingleQuoted(value)}'`),
+		"    url: 'https://www.gstatic.com/generate_204'",
+		"    interval: 300",
+		"    lazy: false",
+	];
 }
 
 function renderProxyGroup(name: string, options: string[]): string[] {
