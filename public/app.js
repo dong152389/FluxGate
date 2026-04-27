@@ -1,5 +1,6 @@
 import { actionRequiresConfiguredSession } from "./app-actions.js";
 import { createAuthDraftState, mergeAuthDraft, readAuthDraft } from "./auth-draft.js";
+import { parseTemplateYamlSummary } from "./preview-utils.mjs";
 
 const state = {
 	user: null,
@@ -160,21 +161,6 @@ document.addEventListener("click", async (event) => {
 		if (action === "copy-clash-url") {
 			const value = state.config.publicUrls?.clash || `${state.config.publicUrl}?format=clash`;
 			await copyText(value, "Clash/Mihomo 订阅链接已复制");
-			return;
-		}
-
-		if (action === "copy-template-url") {
-			const templateId = (button.dataset.templateId || "").trim();
-			if (!templateId) {
-				pushNotice("模板 ID 缺失", true);
-				return;
-			}
-			const template = resolveClashTemplates(state.config).find((item) => item.id === templateId);
-			if (!template?.url) {
-				pushNotice("模板链接不存在", true);
-				return;
-			}
-			await copyText(template.url, `${template.shortLabel || template.label} 链接已复制`);
 			return;
 		}
 
@@ -817,13 +803,10 @@ function renderTemplatesView() {
 	const summary = state.templatePreview.summary && state.templatePreview.summary.templateId === selectedTemplateId
 		? state.templatePreview.summary
 		: null;
-	const metrics = summary?.metrics || null;
-	const groups = summary?.groups || [];
 	const actions = `
-		<button class="btn btn-primary btn-small" data-action="preview-template">生成预览</button>
-		<button class="btn btn-secondary btn-small" data-action="save-config">保存模板</button>
-		<button class="btn btn-secondary btn-small" data-action="copy-template-url" data-template-id="${escapeAttribute(selectedTemplate?.id || "")}">复制模板链接</button>
+		<button class="btn btn-secondary btn-small" data-action="preview-template">生成预览</button>
 		<button class="btn btn-ghost btn-small" data-action="copy-template-yaml">复制 YAML</button>
+		<button class="btn btn-primary btn-small" data-action="save-config">保存</button>
 	`;
 
 	return `
@@ -867,7 +850,7 @@ function renderTemplatesView() {
 				<section class="card template-layout-right">
 					<div class="card-head">
 						<h3>模板预览</h3>
-						<p>${selectedTemplate ? `当前模板：${escapeHtml(selectedTemplate.label)}` : "请选择模板"}</p>
+						<p>${selectedTemplate ? `当前模板：${escapeHtml(selectedTemplate.label)}` : "请选择模板"}，结构与节点列表按最终导入效果展示。</p>
 					</div>
 					${state.templatePreview.loading
 						? `<div class="empty-state">正在生成预览，请稍候...</div>`
@@ -875,50 +858,11 @@ function renderTemplatesView() {
 							? `<div class="empty-state">${escapeHtml(state.templatePreview.error)}</div>`
 							: !summary
 								? `<div class="empty-state">点击“生成预览”查看该模板的节点、代理组和规则统计。</div>`
-								: `
-									<div class="metrics-row template-metrics">
-										<div class="metric-card">
-											<small>节点</small>
-											<strong>${metrics.nodeCount}</strong>
-											<span class="muted">可用代理节点</span>
-										</div>
-										<div class="metric-card">
-											<small>代理组</small>
-											<strong>${metrics.groupCount}</strong>
-											<span class="muted">策略分组总数</span>
-										</div>
-										<div class="metric-card">
-											<small>规则集</small>
-											<strong>${metrics.ruleProviderCount}</strong>
-											<span class="muted">rule-providers</span>
-										</div>
-									</div>
-									<div style="overflow-x:auto;">
-										<table class="preview-table">
-											<thead>
-												<tr>
-													<th>代理组</th>
-													<th>类型</th>
-													<th>默认</th>
-													<th>候选数</th>
-												</tr>
-											</thead>
-											<tbody>
-												${groups.map((group) => `
-													<tr>
-														<td>${escapeHtml(group.name)}</td>
-														<td>${escapeHtml(group.type || "select")}</td>
-														<td>${escapeHtml(group.defaultProxy || "-")}</td>
-														<td>${group.proxyCount}</td>
-													</tr>
-												`).join("")}
-												${groups.length === 0 ? `<tr><td colspan="4" style="text-align:center;color:var(--muted)">未解析到代理组</td></tr>` : ""}
-											</tbody>
-										</table>
-									</div>
-									<div class="code-block">${escapeHtml(summary.yamlSnippet)}</div>
-									<p class="footer-note">上方展示的是模板 YAML 片段，完整内容可点“复制 YAML”。</p>
-								`
+								: renderPolicySummaryPanel(summary, {
+									nodeItems: summary.nodes,
+									nodeTitle: "节点列表",
+									nodeCountLabel: "个",
+								})
 					}
 				</section>
 			</div>
@@ -1173,36 +1117,189 @@ function renderRuleCard(rule, index) {
 }
 
 function renderPreviewPanel() {
-	const batch = state.previewBatch || { type: "prefix", match: "", value: "" };
-	const total = state.preview.nodes.length;
-	const selectedCount = state.preview.nodes.filter((node) => node._selected).length;
-	const allSelected = total > 0 && selectedCount === total;
+	const summary = state.preview.clashSummary;
+	if (!summary) {
+		return `<div class="empty-state">当前预览未生成 Clash 结构摘要，请重新生成预览。</div>`;
+	}
+
 	return `
-		<div class="stack">
-			<div class="inline-actions">
+		<div class="stack preview-stack">
+			<div class="inline-actions preview-status-chips">
 				<span class="badge ok">成功源 ${state.preview.successfulSources}</span>
 				<span class="badge ${state.preview.failedSources ? "fail" : "ok"}">失败源 ${state.preview.failedSources}</span>
 				<span class="badge warn">节点 ${state.preview.nodeCount}</span>
 			</div>
-			<div class="section-list">
+			<div class="preview-source-grid">
 				${state.preview.sourceSummaries.map((item) => `
-					<div class="item-card">
-						<div class="item-card-header">
-							<div>
-								<strong>${escapeHtml(item.sourceName)}</strong>
-								<div class="muted">${item.ok ? `已解析 ${item.nodeCount} 个节点` : escapeHtml(item.error || "拉取失败")}</div>
-							</div>
+					<div class="preview-source-card ${item.ok ? "is-ok" : "is-fail"}">
+						<div class="preview-source-card-head">
+							<strong>${escapeHtml(item.sourceName)}</strong>
 							<span class="badge ${item.ok ? "ok" : "fail"}">${item.ok ? "成功" : "失败"}</span>
 						</div>
+						<p>${item.ok ? `已解析 ${item.nodeCount} 个节点` : escapeHtml(item.error || "拉取失败")}</p>
 					</div>
 				`).join("")}
 			</div>
-			<div class="code-block">${escapeHtml(state.preview.rawText || "当前没有可输出的节点")}</div>
-			<div class="preview-batch-toolbar" data-editor="preview-batch">
+			${renderPolicySummaryPanel(summary, {
+				renderNodePanel: () => renderEditableNodeList(),
+			})}
+		</div>
+	`;
+}
+
+function renderPolicySummaryPanel(summary, options = {}) {
+	const nodePanel = typeof options.renderNodePanel === "function"
+		? options.renderNodePanel()
+		: renderStaticNodeList(options.nodeItems || summary.nodes, {
+			title: options.nodeTitle || "节点列表",
+			countLabel: options.nodeCountLabel || "个",
+		});
+
+	return `
+		<div class="policy-surface">
+			${renderPolicyLegend(summary.legend || [])}
+			<div class="policy-metrics">
+				${renderPolicyMetric("节点", summary.metrics?.nodeCount ?? 0, "可用代理节点")}
+				${renderPolicyMetric("代理组", summary.metrics?.groupCount ?? 0, "策略分组总数")}
+				${renderPolicyMetric("规则集", summary.metrics?.ruleProviderCount ?? 0, "rule-providers")}
+			</div>
+			<div class="policy-group-stack">
+				${summary.groups?.length
+					? summary.groups.map((group, index) => renderPolicyGroupCard(group, index)).join("")
+					: `<div class="policy-empty">未解析到代理组。</div>`}
+			</div>
+			${nodePanel}
+		</div>
+	`;
+}
+
+function renderPolicyLegend(legend) {
+	if (!legend.length) {
+		return "";
+	}
+
+	return `
+		<div class="policy-legend">
+			${legend.map((item) => `
+				<span class="policy-legend-item">
+					<i class="policy-dot tone-${escapeAttribute(item.color)}"></i>
+					${escapeHtml(item.label)}
+				</span>
+			`).join("")}
+		</div>
+	`;
+}
+
+function renderPolicyMetric(label, value, hint) {
+	return `
+		<div class="policy-metric-card">
+			<strong>${escapeHtml(`${value}`)}</strong>
+			<small>${escapeHtml(label)}</small>
+			<span>${escapeHtml(hint)}</span>
+		</div>
+	`;
+}
+
+function renderPolicyGroupCard(group, index) {
+	const detailOpen = group.category?.id !== "core" && index < 4 ? "open" : "";
+	const titleIcon = group.icon ? `<span class="policy-group-icon">${escapeHtml(group.icon)}</span>` : "";
+	const itemCount = group.items?.length ?? 0;
+	const countLabel = itemCount ? `${itemCount} 项` : `${group.proxyCount || 0} 候选`;
+
+	return `
+		<details class="policy-group-card tone-${escapeAttribute(group.category?.color || "slate")}" ${detailOpen}>
+			<summary class="policy-group-summary">
+				<div class="policy-group-grip" aria-hidden="true">
+					<span></span><span></span><span></span>
+					<span></span><span></span><span></span>
+				</div>
+				<div class="policy-group-main">
+					<div class="policy-group-title">
+						${titleIcon}
+						<strong>${escapeHtml(group.displayName || group.name)}</strong>
+					</div>
+					<span class="policy-group-count">${escapeHtml(countLabel)}</span>
+				</div>
+				<div class="policy-group-meta">
+					<span>${escapeHtml(group.modeLabel || "手动选择")}</span>
+					<span>默认：${escapeHtml(group.defaultLabel || "-")}</span>
+				</div>
+			</summary>
+			<div class="policy-group-body">
+				${group.items?.length
+					? group.items.map((item) => renderPolicyGroupItem(item, group)).join("")
+					: `<div class="policy-empty">当前没有可展示的规则项。</div>`}
+			</div>
+		</details>
+	`;
+}
+
+function renderPolicyGroupItem(item, group) {
+	return `
+		<div class="policy-group-item">
+			<div class="policy-group-item-main">
+				<i class="policy-dot tone-${escapeAttribute(group.category?.color || "slate")}"></i>
+				<span>${escapeHtml(item.label || item.key || "-")}</span>
+			</div>
+			<span class="policy-item-badge">${escapeHtml(item.badge || "rule")}</span>
+		</div>
+	`;
+}
+
+function renderStaticNodeList(nodes, options = {}) {
+	const title = options.title || "节点列表";
+	const total = Array.isArray(nodes) ? nodes.length : 0;
+
+	return `
+		<section class="policy-node-section">
+			<div class="policy-section-head">
+				<h3>${escapeHtml(title)}</h3>
+				<span>共 ${total} ${escapeHtml(options.countLabel || "个")}</span>
+			</div>
+			<div class="policy-node-list">
+				${total
+					? nodes.map((node) => renderStaticNodeRow(node)).join("")
+					: `<div class="policy-empty">当前没有可展示的节点。</div>`}
+			</div>
+		</section>
+	`;
+}
+
+function renderStaticNodeRow(node) {
+	return `
+		<div class="policy-node-row">
+			<div class="policy-node-identity">
+				<i class="policy-dot tone-${escapeAttribute(resolveProtocolTone(node.protocol))}"></i>
+				<div>
+					<strong>${escapeHtml(node.name || node.finalName || "-")}</strong>
+				</div>
+			</div>
+			<span class="policy-node-pill">${escapeHtml(`${node.protocol || "UNKNOWN"}`.toUpperCase())}</span>
+		</div>
+	`;
+}
+
+function renderEditableNodeList() {
+	const batch = state.previewBatch || { type: "prefix", match: "", value: "" };
+	const total = state.preview.nodes.length;
+	const selectedCount = state.preview.nodes.filter((node) => node._selected).length;
+	const allSelected = total > 0 && selectedCount === total;
+
+	return `
+		<section class="policy-node-section">
+			<div class="policy-section-head">
+				<h3>节点列表</h3>
+				<span>共 ${total} 个</span>
+			</div>
+			<div class="preview-batch-toolbar preview-batch-toolbar-dark" data-editor="preview-batch">
 				<div class="preview-batch-info">
 					<strong>已选 ${selectedCount}</strong>
 					<span class="muted">/ ${total}</span>
 				</div>
+				<label class="preview-select-all">
+					<input type="checkbox" data-action="toggle-select-all-nodes" ${allSelected ? "checked" : ""} aria-label="全选节点" />
+					<span>全选</span>
+				</label>
 				<div class="field">
 					<label>操作</label>
 					<select data-preview-batch-type>
@@ -1227,39 +1324,43 @@ function renderPreviewPanel() {
 					<button class="btn btn-primary btn-small" data-action="save-all-aliases">批量保存</button>
 				</div>
 			</div>
-			<div style="overflow-x: auto;">
-				<table class="preview-table">
-					<thead>
-						<tr>
-							<th><input type="checkbox" data-action="toggle-select-all-nodes" ${allSelected ? "checked" : ""} aria-label="全选" /></th>
-							<th>来源</th>
-							<th>协议</th>
-							<th>原始名称</th>
-							<th>最终名称</th>
-							<th>单节点别名</th>
-						</tr>
-					</thead>
-					<tbody>
-						${state.preview.nodes.map((node) => `
-							<tr data-node-fingerprint="${escapeAttribute(node.fingerprint)}">
-								<td><input type="checkbox" data-preview-select ${node._selected ? "checked" : ""} aria-label="选择 ${escapeAttribute(node.finalName)}" /></td>
-								<td>${escapeHtml(node.sourceName)}</td>
-								<td>${escapeHtml(node.protocol)}</td>
-								<td>${escapeHtml(node.originalName)}</td>
-								<td>${escapeHtml(node.finalName)}</td>
-								<td>
-									<div class="inline-actions">
-										<input data-alias-input value="${escapeAttribute(node.alias || "")}" placeholder="自定义别名" />
-										<button class="btn btn-secondary btn-small" data-action="save-alias" data-fingerprint="${escapeAttribute(node.fingerprint)}">保存</button>
-									</div>
-								</td>
-							</tr>
-						`).join("")}
-					</tbody>
-				</table>
+			<div class="policy-node-list policy-node-list-editable">
+				${state.preview.nodes.map((node) => renderEditableNodeRow(node)).join("")}
+			</div>
+		</section>
+	`;
+}
+
+function renderEditableNodeRow(node) {
+	return `
+		<div class="policy-node-row policy-node-row-editable" data-node-fingerprint="${escapeAttribute(node.fingerprint)}">
+			<div class="policy-node-row-main">
+				<div class="policy-node-identity">
+					<input type="checkbox" data-preview-select ${node._selected ? "checked" : ""} aria-label="选择 ${escapeAttribute(node.finalName)}" />
+					<i class="policy-dot tone-${escapeAttribute(resolveProtocolTone(node.protocol))}"></i>
+					<div>
+						<strong>${escapeHtml(node.finalName)}</strong>
+						<span>${escapeHtml(node.sourceName)} · ${escapeHtml(node.originalName)}</span>
+					</div>
+				</div>
+				<span class="policy-node-pill">${escapeHtml(`${node.protocol || "UNKNOWN"}`.toUpperCase())}</span>
+			</div>
+			<div class="policy-node-editor">
+				<input data-alias-input value="${escapeAttribute(node.alias || "")}" placeholder="自定义别名" />
+				<button class="btn btn-secondary btn-small" data-action="save-alias" data-fingerprint="${escapeAttribute(node.fingerprint)}">保存</button>
 			</div>
 		</div>
 	`;
+}
+
+function resolveProtocolTone(protocol) {
+	const value = `${protocol || ""}`.trim().toLowerCase();
+	if (value === "vless") return "violet";
+	if (value === "vmess") return "blue";
+	if (value === "trojan") return "pink";
+	if (value === "hysteria2" || value === "hy2") return "orange";
+	if (value === "anytls") return "teal";
+	return "slate";
 }
 
 async function submitAuth(form) {
@@ -1463,6 +1564,9 @@ async function saveConfig() {
 
 async function loadPreview() {
 	const preview = await api("/api/preview");
+	preview.clashSummary = preview.clashYamlText
+		? parseTemplateYamlSummary(preview.clashYamlText, preview.clashTemplateId || state.config?.settings?.clashTemplateId || "fixed-full")
+		: null;
 	state.preview = preview;
 	pushNotice(`预览完成，共生成 ${preview.nodeCount} 个节点`);
 	render();
@@ -1861,154 +1965,6 @@ async function loadTemplatePreview(templateId, options = {}) {
 		state.templatePreview.loading = false;
 		render();
 	}
-}
-
-function parseTemplateYamlSummary(yamlText, templateId) {
-	const proxiesSection = readYamlSection(yamlText, "proxies", "proxy-groups");
-	const groupsSection = readYamlSection(yamlText, "proxy-groups", "rule-providers");
-	const providersSection = readYamlSection(yamlText, "rule-providers", "rules");
-	const rulesSection = readYamlSection(yamlText, "rules", null);
-
-	const groups = parseTemplateProxyGroups(groupsSection);
-	const nodeCount = countYamlListItems(proxiesSection, 2);
-	const ruleProviderCount = countYamlMappings(providersSection, 2);
-	const ruleCount = countYamlListItems(rulesSection, 2);
-	const snippet = yamlText.length > 3200
-		? `${yamlText.slice(0, 3200)}\n\n# ... 预览截断，复制可获取完整 YAML`
-		: yamlText;
-
-	return {
-		templateId,
-		yamlText,
-		yamlSnippet: snippet,
-		metrics: {
-			nodeCount,
-			groupCount: groups.length,
-			ruleProviderCount,
-			ruleCount,
-		},
-		groups,
-	};
-}
-
-function readYamlSection(yamlText, startKey, endKey) {
-	const startRegex = new RegExp(`^${escapeRegex(startKey)}:\\r?\\n`, "m");
-	const startMatch = startRegex.exec(yamlText);
-	if (!startMatch) {
-		return "";
-	}
-
-	const startIndex = startMatch.index + startMatch[0].length;
-	if (!endKey) {
-		return yamlText.slice(startIndex);
-	}
-
-	const endRegex = new RegExp(`^${escapeRegex(endKey)}:\\r?\\n`, "m");
-	endRegex.lastIndex = startIndex;
-	const sliced = yamlText.slice(startIndex);
-	const endMatch = endRegex.exec(sliced);
-	if (!endMatch) {
-		return sliced;
-	}
-
-	return sliced.slice(0, endMatch.index);
-}
-
-function countYamlListItems(sectionText, indentSpaces) {
-	if (!sectionText) {
-		return 0;
-	}
-	const regex = new RegExp(`^\\s{${indentSpaces}}-\\s`, "gm");
-	return [...sectionText.matchAll(regex)].length;
-}
-
-function countYamlMappings(sectionText, indentSpaces) {
-	if (!sectionText) {
-		return 0;
-	}
-	const regex = new RegExp(`^\\s{${indentSpaces}}[^\\s#][^:]*:\\s`, "gm");
-	return [...sectionText.matchAll(regex)].length;
-}
-
-function parseTemplateProxyGroups(sectionText) {
-	if (!sectionText) {
-		return [];
-	}
-
-	const lines = sectionText.split(/\r?\n/);
-	const groups = [];
-	let current = null;
-	let readingProxyList = false;
-
-	for (const rawLine of lines) {
-		const line = rawLine.trimEnd();
-		const nameMatch = line.match(/^\s{2}-\sname:\s(.+)$/);
-		if (nameMatch) {
-			if (current) {
-				groups.push(current);
-			}
-			current = {
-				name: normalizeYamlValue(nameMatch[1]),
-				type: "select",
-				defaultProxy: "-",
-				proxyCount: 0,
-			};
-			readingProxyList = false;
-			continue;
-		}
-
-		if (!current) {
-			continue;
-		}
-
-		const typeMatch = line.match(/^\s{4}type:\s(.+)$/);
-		if (typeMatch) {
-			current.type = normalizeYamlValue(typeMatch[1]);
-			continue;
-		}
-
-		if (/^\s{4}proxies:\s*$/.test(line)) {
-			readingProxyList = true;
-			continue;
-		}
-
-		if (readingProxyList) {
-			const proxyMatch = line.match(/^\s{6}-\s(.+)$/);
-			if (proxyMatch) {
-				const option = normalizeYamlValue(proxyMatch[1]);
-				current.proxyCount += 1;
-				if (current.defaultProxy === "-") {
-					current.defaultProxy = option;
-				}
-				continue;
-			}
-
-			if (/^\s{2}-\sname:/.test(line)) {
-				readingProxyList = false;
-			}
-		}
-	}
-
-	if (current) {
-		groups.push(current);
-	}
-
-	return groups;
-}
-
-function normalizeYamlValue(value) {
-	const trimmed = `${value || ""}`.trim();
-	if (
-		(trimmed.startsWith("'") && trimmed.endsWith("'")) ||
-		(trimmed.startsWith("\"") && trimmed.endsWith("\""))
-	) {
-		return trimmed.slice(1, -1);
-	}
-	return trimmed;
-}
-
-function escapeRegex(value) {
-	return `${value}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function resolvePublicUrls(config) {

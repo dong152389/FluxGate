@@ -214,6 +214,8 @@ export interface PreviewResponse {
 	failedSources: number;
 	rawText: string;
 	encodedText: string;
+	clashTemplateId: string;
+	clashYamlText: string;
 	nodes: PreviewNode[];
 }
 

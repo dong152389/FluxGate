@@ -459,11 +459,15 @@ async function handlePreview(request: Request, env: AppEnv): Promise<Response> {
 		settings: config.settings,
 		aliases,
 	});
+	const clashTemplateId = resolveClashTemplateId(config.settings.clashTemplateId);
+	const clash = buildClashSubscription(aggregate.nodes, { templateId: clashTemplateId });
 
 	return json({
 		generatedAt: new Date().toISOString(),
 		...aggregate,
 		nodeCount: aggregate.nodes.length,
+		clashTemplateId,
+		clashYamlText: clash.yamlText,
 	});
 }
 
