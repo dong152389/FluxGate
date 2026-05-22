@@ -20,6 +20,7 @@ const state = {
 		error: null,
 		summary: null,
 	},
+	theme: localStorage.getItem("subflow-theme") || "eye-care",
 };
 
 const app = document.getElementById("app");
@@ -28,6 +29,10 @@ const toastTimers = new Map();
 boot();
 
 async function boot() {
+	const currentTheme = state.theme;
+	document.body.classList.remove("theme-light", "theme-dark", "theme-eye-care");
+	document.body.classList.add(`theme-${currentTheme}`);
+
 	render();
 	try {
 		const me = await api("/api/auth/me");
@@ -73,6 +78,16 @@ document.addEventListener("click", async (event) => {
 
 		if (action === "switch-auth") {
 			state.authMode = button.dataset.mode || "login";
+			render();
+			return;
+		}
+
+		if (action === "switch-theme") {
+			const theme = button.dataset.theme;
+			state.theme = theme;
+			localStorage.setItem("subflow-theme", theme);
+			document.body.classList.remove("theme-light", "theme-dark", "theme-eye-care");
+			document.body.classList.add(`theme-${theme}`);
 			render();
 			return;
 		}
@@ -187,7 +202,13 @@ document.addEventListener("click", async (event) => {
 				pushNotice("请先生成预览", false, "warn");
 				return;
 			}
-			await copyText(state.preview.rawText, "聚合文本已复制");
+			const selected = state.preview.nodes.filter((node) => node._selected);
+			if (!selected.length) {
+				pushNotice("请先勾选需要复制的节点", false, "warn");
+				return;
+			}
+			const value = selected.map((node) => node.finalUri).join("\n");
+			await copyText(value, `已复制 ${selected.length} 个节点的明文`);
 			return;
 		}
 
@@ -196,7 +217,14 @@ document.addEventListener("click", async (event) => {
 				pushNotice("请先生成预览", false, "warn");
 				return;
 			}
-			await copyText(state.preview.encodedText, "Base64 订阅已复制");
+			const selected = state.preview.nodes.filter((node) => node._selected);
+			if (!selected.length) {
+				pushNotice("请先勾选需要复制的节点", false, "warn");
+				return;
+			}
+			const rawText = selected.map((node) => node.finalUri).join("\n");
+			const encodedText = btoa(unescape(encodeURIComponent(rawText)));
+			await copyText(encodedText, `已复制 ${selected.length} 个节点的 Base64 订阅`);
 			return;
 		}
 
@@ -251,7 +279,7 @@ document.addEventListener("click", async (event) => {
 					url: buildClashTemplateUrl(result.publicUrl, item.id),
 				}));
 				resetTemplatePreview();
-				pushNotice("公开订阅 token 已重置，旧链接已失效");
+				pushNotice("公开订阅链接已重置，旧链接已失效");
 				render();
 			});
 			return;
@@ -428,6 +456,147 @@ document.addEventListener("change", async (event) => {
 	}
 });
 
+let draggedIndex = null;
+let draggedContext = null;
+
+document.addEventListener("mousedown", (e) => {
+	const grip = e.target.closest(".policy-group-grip");
+	if (grip) {
+		const card = grip.closest(".policy-group-card");
+		if (card) {
+			card.setAttribute("draggable", "true");
+		}
+	}
+});
+
+document.addEventListener("mouseup", (e) => {
+	const cards = document.querySelectorAll(".policy-group-card[draggable='true']");
+	for (const card of cards) {
+		card.setAttribute("draggable", "false");
+	}
+});
+
+document.addEventListener("dragstart", (e) => {
+	const card = e.target.closest(".policy-group-card");
+	if (!card) return;
+
+	draggedIndex = parseInt(card.dataset.index, 10);
+	draggedContext = card.dataset.context;
+
+	card.classList.add("dragging");
+	e.dataTransfer.effectAllowed = "move";
+});
+
+document.addEventListener("dragover", (e) => {
+	const card = e.target.closest(".policy-group-card");
+	if (!card || card.dataset.context !== draggedContext) return;
+
+	e.preventDefault();
+
+	const rect = card.getBoundingClientRect();
+	const midY = rect.top + rect.height / 2;
+	if (e.clientY < midY) {
+		card.classList.add("drag-over-top");
+		card.classList.remove("drag-over-bottom");
+	} else {
+		card.classList.add("drag-over-bottom");
+		card.classList.remove("drag-over-top");
+	}
+});
+
+document.addEventListener("dragleave", (e) => {
+	const card = e.target.closest(".policy-group-card");
+	if (card) {
+		card.classList.remove("drag-over-top", "drag-over-bottom");
+	}
+});
+
+document.addEventListener("drop", (e) => {
+	const card = e.target.closest(".policy-group-card");
+	if (!card || card.dataset.context !== draggedContext) return;
+
+	e.preventDefault();
+
+	const targetIndex = parseInt(card.dataset.index, 10);
+	if (draggedIndex !== null && targetIndex !== draggedIndex) {
+		const rect = card.getBoundingClientRect();
+		const midY = rect.top + rect.height / 2;
+		const isTop = e.clientY < midY;
+
+		moveGroup(draggedContext, draggedIndex, targetIndex, isTop);
+	}
+
+	cleanupDrag();
+});
+
+document.addEventListener("dragend", (e) => {
+	cleanupDrag();
+});
+
+function cleanupDrag() {
+	draggedIndex = null;
+	draggedContext = null;
+	const cards = document.querySelectorAll(".policy-group-card");
+	for (const card of cards) {
+		card.classList.remove("dragging", "drag-over-top", "drag-over-bottom");
+		card.setAttribute("draggable", "false");
+	}
+}
+
+function moveGroup(context, fromIndex, toIndex, isTop) {
+	let summary;
+	if (context === "preview") {
+		summary = state.preview?.clashSummary;
+	} else if (context === "template") {
+		summary = state.templatePreview?.summary;
+	}
+
+	if (!summary || !summary.groups) return;
+
+	const groups = summary.groups;
+	if (fromIndex < 0 || fromIndex >= groups.length || toIndex < 0 || toIndex >= groups.length) {
+		return;
+	}
+
+	const [item] = groups.splice(fromIndex, 1);
+
+	let insertIndex = toIndex;
+	if (fromIndex < toIndex) {
+		if (isTop) {
+			insertIndex = toIndex - 1;
+		} else {
+			insertIndex = toIndex;
+		}
+	} else {
+		if (isTop) {
+			insertIndex = toIndex;
+		} else {
+			insertIndex = toIndex + 1;
+		}
+	}
+
+	insertIndex = Math.max(0, Math.min(groups.length, insertIndex));
+	groups.splice(insertIndex, 0, item);
+
+	rebuildLegend(summary);
+	render();
+}
+
+function rebuildLegend(summary) {
+	if (!summary.groups) return;
+	const seen = new Set();
+	const legend = [];
+	for (const group of summary.groups) {
+		if (!group.category) continue;
+		if (seen.has(group.category.id)) {
+			continue;
+		}
+		seen.add(group.category.id);
+		legend.push(group.category);
+	}
+	summary.legend = legend;
+}
+
 function render() {
 	syncAuthDraft();
 
@@ -454,12 +623,43 @@ function render() {
 	app.innerHTML = renderDashboard();
 }
 
+function renderThemeSwitcher(floating = false) {
+	const current = state.theme;
+	const themes = [
+		{ id: "light", label: "浅色" },
+		{ id: "dark", label: "深色" },
+		{ id: "eye-care", label: "护眼" },
+	];
+	const buttons = themes.map(t => `
+		<button class="theme-btn ${t.id === current ? "active" : ""}" data-action="switch-theme" data-theme="${t.id}">
+			${t.label}
+		</button>
+	`).join("");
+
+	if (floating) {
+		return `
+			<div class="auth-theme-floating">
+				<div class="theme-switcher">
+					${buttons}
+				</div>
+			</div>
+		`;
+	}
+
+	return `
+		<div class="theme-switcher">
+			${buttons}
+		</div>
+	`;
+}
+
 function renderLoading() {
 	return `
 		<div class="auth-wrap">
+			${renderThemeSwitcher(true)}
 			<div class="auth-card">
 				<section class="auth-hero">
-					<div class="eyebrow">FluxGate</div>
+					<div class="eyebrow">SubFlow</div>
 					<h1>准备你的聚合控制台</h1>
 					<p>正在初始化会话和本地配置，请稍候。</p>
 				</section>
@@ -477,15 +677,16 @@ function renderAuth() {
 	const authDraft = readAuthDraft(state.authDraft, state.authMode);
 	return `
 		<div class="auth-wrap">
+			${renderThemeSwitcher(true)}
 			<div class="auth-card">
 				<section class="auth-hero">
 					<div class="eyebrow">Secure Merge</div>
-					<h1>FluxGate</h1>
+					<h1>SubFlow</h1>
 					<p>把多个上游订阅整合成一个安全、可控、可重命名的新订阅入口。</p>
 					<ul>
 						<li>支持多订阅源聚合与去重</li>
 						<li>支持批量改名和单节点别名</li>
-						<li>每个用户独立 token 与隔离配置</li>
+						<li>每个用户独立订阅链接与隔离配置</li>
 					</ul>
 				</section>
 				<section class="auth-panel">
@@ -531,6 +732,7 @@ function renderAuth() {
 function renderVerifyEmailView() {
 	return `
 		<div class="auth-wrap">
+			${renderThemeSwitcher(true)}
 			<div class="auth-card">
 				<section class="auth-hero">
 					<div class="eyebrow">安全验证</div>
@@ -610,9 +812,9 @@ function renderSidebar(activeView) {
 	return `
 		<aside class="sidebar">
 			<div class="sidebar-brand">
-				<span class="brand-mark">Fx</span>
+				<span class="brand-mark">Sf</span>
 				<div class="brand-meta">
-					<strong>FluxGate</strong>
+					<strong>SubFlow</strong>
 					<small>订阅聚合控制台</small>
 				</div>
 			</div>
@@ -632,7 +834,8 @@ function renderSidebar(activeView) {
 						<small>已登录</small>
 					</div>
 				</div>
-				<button class="btn btn-secondary btn-small btn-block" data-action="logout">退出登录</button>
+				${renderThemeSwitcher(false)}
+				<button class="btn btn-secondary btn-small btn-block" style="margin-top: 8px;" data-action="logout">退出登录</button>
 			</div>
 		</aside>
 	`;
@@ -668,12 +871,12 @@ function renderOverview() {
 	const username = state.user?.username || "";
 	const publicUrls = resolvePublicUrls(state.config);
 	return `
-		${renderWorkspaceHead("FluxGate · 概览", "聚合控制台", "把多个上游订阅整合成稳定可控的单一入口")}
+		${renderWorkspaceHead("SubFlow · 概览", "聚合控制台", "把多个上游订阅整合成稳定可控的单一入口")}
 		<div class="workspace-body">
 			<section class="hello-card">
 				<div>
 					<span class="eyebrow-dim">你好, ${escapeHtml(username)}</span>
-					<h2>管理订阅源、规则与公开拉取 token</h2>
+					<h2>管理订阅源、规则与公开订阅链接</h2>
 					<p class="muted">推荐流程：保存配置 → 预览节点 → 给客户端使用公开链接</p>
 				</div>
 				<div class="hello-badge">
@@ -713,10 +916,10 @@ function renderOverview() {
 				<div class="toolbar">
 					<button class="btn btn-primary btn-small" data-action="copy-public-url">复制 v2ray 链接</button>
 					<button class="btn btn-secondary btn-small" data-action="copy-clash-url">复制 Clash 链接</button>
-					<button class="btn btn-secondary btn-small" data-action="reset-token">重置 token</button>
+					<button class="btn btn-secondary btn-small" data-action="reset-token">重置订阅链接</button>
 					<button class="btn btn-ghost btn-small" data-action="refresh-cache">刷新缓存</button>
 				</div>
-				<p class="footer-note">重置 token 后，旧链接会立即失效。</p>
+				<p class="footer-note">重置订阅链接后，旧链接会立即失效。</p>
 			</section>
 		</div>
 	`;
@@ -728,7 +931,7 @@ function renderSourcesView() {
 		<button class="btn btn-primary btn-small" data-action="save-config">保存配置</button>
 	`;
 	return `
-		${renderWorkspaceHead("FluxGate · 订阅源", "订阅源管理", "添加多个上游链接，控制优先级、启用状态和单源测试", actions)}
+		${renderWorkspaceHead("SubFlow · 订阅源", "订阅源管理", "添加多个上游链接，控制优先级、启用状态和单源测试", actions)}
 		<div class="workspace-body">
 			<section class="card">
 				<div class="section-list" data-editor="sources">
@@ -749,7 +952,7 @@ function renderRulesView() {
 		<button class="btn btn-primary btn-small" data-action="save-config">保存配置</button>
 	`;
 	return `
-		${renderWorkspaceHead("FluxGate · 规则", "聚合规则", "去重策略、来源前缀、排序与批量改名", actions)}
+		${renderWorkspaceHead("SubFlow · 规则", "聚合规则", "去重策略、来源前缀、排序与批量改名", actions)}
 		<div class="workspace-body">
 			<section class="card" data-editor="settings">
 				<div class="card-head">
@@ -810,7 +1013,7 @@ function renderTemplatesView() {
 	`;
 
 	return `
-		${renderWorkspaceHead("FluxGate · 模板", "Clash/Mihomo 模板", "固定模板分为精简版、标准版、完整版，且可直接预览分组效果", actions)}
+		${renderWorkspaceHead("SubFlow · 模板", "Clash/Mihomo 模板", "固定模板分为精简版、标准版、完整版，且可直接预览分组效果", actions)}
 		<div class="workspace-body">
 			<div class="template-layout">
 				<section class="card template-layout-left">
@@ -822,7 +1025,7 @@ function renderTemplatesView() {
 						${templates.length
 							? templates.map((template) => `
 								<label class="item-card template-option ${template.id === selectedTemplateId ? "active" : ""}">
-									<div class="inline-actions" style="justify-content:space-between;align-items:flex-start;">
+									<div class="template-option-top">
 										<div class="template-option-head">
 											<input
 												type="radio"
@@ -831,17 +1034,14 @@ function renderTemplatesView() {
 												value="${escapeAttribute(template.id)}"
 												${template.id === selectedTemplateId ? "checked" : ""}
 											/>
-											<div>
-												<strong>${escapeHtml(template.shortLabel || template.label)}</strong>
-												<div class="muted">${escapeHtml(template.label)}</div>
-											</div>
+											<strong>${escapeHtml(template.shortLabel || template.label)}</strong>
 										</div>
-										<div class="inline-actions">
-											<span class="badge ok">固定</span>
+										<div class="template-option-badges">
 											${template.isDefault ? `<span class="badge ok">默认</span>` : ""}
+											<span class="badge ok">固定</span>
 										</div>
 									</div>
-									<div class="muted">${escapeHtml(template.description || "")}</div>
+									<div class="template-option-desc text-muted">${escapeHtml(template.description || "")}</div>
 								</label>
 							`).join("")
 							: `<div class="empty-state">当前没有可用模板。</div>`}
@@ -862,6 +1062,7 @@ function renderTemplatesView() {
 									nodeItems: summary.nodes,
 									nodeTitle: "节点列表",
 									nodeCountLabel: "个",
+									context: "template",
 								})
 					}
 				</section>
@@ -873,11 +1074,11 @@ function renderTemplatesView() {
 function renderPreviewView() {
 	const actions = `
 		<button class="btn btn-primary btn-small" data-action="preview">生成预览</button>
-		<button class="btn btn-secondary btn-small" data-action="copy-raw-output">复制明文</button>
-		<button class="btn btn-ghost btn-small" data-action="copy-b64-output">复制 Base64</button>
+		<button class="btn btn-secondary btn-small" data-action="copy-b64-output">复制选中</button>
+		<button class="btn btn-ghost btn-small" data-action="copy-public-url">复制聚合链接</button>
 	`;
 	return `
-		${renderWorkspaceHead("FluxGate · 预览", "节点预览", "预览聚合效果，并对单个节点持久化别名", actions)}
+		${renderWorkspaceHead("SubFlow · 预览", "节点预览", "预览聚合效果，并对单个节点持久化别名", actions)}
 		<div class="workspace-body">
 			${state.preview ? `<section class="card">${renderPreviewPanel()}</section>` : `<div class="empty-state">预览尚未生成。建议在保存配置后执行一次预览。</div>`}
 		</div>
@@ -888,7 +1089,7 @@ function renderAccountView() {
 	const boundEmail = state.user?.email || "";
 	const publicUrls = resolvePublicUrls(state.config);
 	return `
-		${renderWorkspaceHead("FluxGate · 账号", "账号安全", "修改密码、绑定邮箱并管理公开订阅入口")}
+		${renderWorkspaceHead("SubFlow · 账号", "账号安全", "修改密码、绑定邮箱并管理公开订阅入口")}
 		<div class="workspace-body">
 			<section class="card">
 				<div class="card-head">
@@ -933,7 +1134,7 @@ function renderAccountView() {
 			</section>
 			<section class="card">
 				<div class="card-head">
-					<h3>公开订阅 token</h3>
+					<h3>公开订阅链接</h3>
 					<p>重置或刷新公开订阅缓存，旧链接会立即失效</p>
 				</div>
 				<div class="field">
@@ -947,7 +1148,7 @@ function renderAccountView() {
 				<div class="toolbar">
 					<button class="btn btn-secondary btn-small" data-action="copy-public-url">复制 v2ray 链接</button>
 					<button class="btn btn-secondary btn-small" data-action="copy-clash-url">复制 Clash 链接</button>
-					<button class="btn btn-secondary btn-small" data-action="reset-token">重置 token</button>
+					<button class="btn btn-secondary btn-small" data-action="reset-token">重置订阅链接</button>
 					<button class="btn btn-ghost btn-small" data-action="refresh-cache">刷新缓存</button>
 				</div>
 			</section>
@@ -958,7 +1159,7 @@ function renderAccountView() {
 function renderAdminView() {
 	const users = state.adminUsers || [];
 	return `
-		${renderWorkspaceHead("FluxGate · 用户管理", "用户管理", "查看和管理系统注册用户")}
+		${renderWorkspaceHead("SubFlow · 用户管理", "用户管理", "查看和管理系统注册用户")}
 		<div class="workspace-body">
 			<section class="card">
 				<div class="card-head">
@@ -1140,14 +1341,13 @@ function renderPreviewPanel() {
 					</div>
 				`).join("")}
 			</div>
-			${renderPolicySummaryPanel(summary, {
-				renderNodePanel: () => renderEditableNodeList(),
-			})}
+			${renderEditableNodeList()}
 		</div>
 	`;
 }
 
 function renderPolicySummaryPanel(summary, options = {}) {
+	const context = options.context || "";
 	const nodePanel = typeof options.renderNodePanel === "function"
 		? options.renderNodePanel()
 		: renderStaticNodeList(options.nodeItems || summary.nodes, {
@@ -1163,9 +1363,9 @@ function renderPolicySummaryPanel(summary, options = {}) {
 				${renderPolicyMetric("代理组", summary.metrics?.groupCount ?? 0, "策略分组总数")}
 				${renderPolicyMetric("规则集", summary.metrics?.ruleProviderCount ?? 0, "rule-providers")}
 			</div>
-			<div class="policy-group-stack">
+			<div class="policy-group-stack" data-context="${escapeAttribute(context)}">
 				${summary.groups?.length
-					? summary.groups.map((group, index) => renderPolicyGroupCard(group, index)).join("")
+					? summary.groups.map((group, index) => renderPolicyGroupCard(group, index, context)).join("")
 					: `<div class="policy-empty">未解析到代理组。</div>`}
 			</div>
 			${nodePanel}
@@ -1200,14 +1400,14 @@ function renderPolicyMetric(label, value, hint) {
 	`;
 }
 
-function renderPolicyGroupCard(group, index) {
-	const detailOpen = group.category?.id !== "core" && index < 4 ? "open" : "";
+function renderPolicyGroupCard(group, index, context = "") {
+	const detailOpen = "";
 	const titleIcon = group.icon ? `<span class="policy-group-icon">${escapeHtml(group.icon)}</span>` : "";
 	const itemCount = group.items?.length ?? 0;
 	const countLabel = itemCount ? `${itemCount} 项` : `${group.proxyCount || 0} 候选`;
 
 	return `
-		<details class="policy-group-card tone-${escapeAttribute(group.category?.color || "slate")}" ${detailOpen}>
+		<details class="policy-group-card tone-${escapeAttribute(group.category?.color || "slate")}" ${detailOpen} data-index="${index}" data-context="${escapeAttribute(context)}">
 			<summary class="policy-group-summary">
 				<div class="policy-group-grip" aria-hidden="true">
 					<span></span><span></span><span></span>
@@ -1223,6 +1423,11 @@ function renderPolicyGroupCard(group, index) {
 				<div class="policy-group-meta">
 					<span>${escapeHtml(group.modeLabel || "手动选择")}</span>
 					<span>默认：${escapeHtml(group.defaultLabel || "-")}</span>
+				</div>
+				<div class="policy-group-arrow" aria-hidden="true">
+					<svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+						<polyline points="6 9 12 15 18 9"></polyline>
+					</svg>
 				</div>
 			</summary>
 			<div class="policy-group-body">
@@ -1269,7 +1474,7 @@ function renderStaticNodeRow(node) {
 	return `
 		<div class="policy-node-row">
 			<div class="policy-node-identity">
-				<i class="policy-dot tone-${escapeAttribute(resolveProtocolTone(node.protocol))}"></i>
+				<i class="policy-dot tone-${escapeAttribute(resolveSourceTone(node.sourceId, node.sourceName))}"></i>
 				<div>
 					<strong>${escapeHtml(node.name || node.finalName || "-")}</strong>
 				</div>
@@ -1337,7 +1542,7 @@ function renderEditableNodeRow(node) {
 			<div class="policy-node-row-main">
 				<div class="policy-node-identity">
 					<input type="checkbox" data-preview-select ${node._selected ? "checked" : ""} aria-label="选择 ${escapeAttribute(node.finalName)}" />
-					<i class="policy-dot tone-${escapeAttribute(resolveProtocolTone(node.protocol))}"></i>
+					<i class="policy-dot tone-${escapeAttribute(resolveSourceTone(node.sourceId, node.sourceName))}"></i>
 					<div>
 						<strong>${escapeHtml(node.finalName)}</strong>
 						<span>${escapeHtml(node.sourceName)} · ${escapeHtml(node.originalName)}</span>
@@ -1351,6 +1556,18 @@ function renderEditableNodeRow(node) {
 			</div>
 		</div>
 	`;
+}
+
+const SOURCE_TONES = ["blue", "green", "violet", "pink", "orange", "teal", "gold", "slate"];
+
+function resolveSourceTone(sourceId, sourceName) {
+	const key = sourceId || sourceName || "default";
+	let hash = 0;
+	for (let i = 0; i < key.length; i++) {
+		hash = key.charCodeAt(i) + ((hash << 5) - hash);
+	}
+	const index = Math.abs(hash) % SOURCE_TONES.length;
+	return SOURCE_TONES[index];
 }
 
 function resolveProtocolTone(protocol) {
@@ -1567,6 +1784,11 @@ async function loadPreview() {
 	preview.clashSummary = preview.clashYamlText
 		? parseTemplateYamlSummary(preview.clashYamlText, preview.clashTemplateId || state.config?.settings?.clashTemplateId || "fixed-full")
 		: null;
+	if (preview.nodes) {
+		preview.nodes.forEach((node) => {
+			node._selected = true;
+		});
+	}
 	state.preview = preview;
 	pushNotice(`预览完成，共生成 ${preview.nodeCount} 个节点`);
 	render();

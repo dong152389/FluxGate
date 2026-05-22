@@ -373,7 +373,7 @@ async function handleSendCode(request: Request, env: AppEnv): Promise<Response> 
 	try {
 		await sendEmail(env, {
 			to: email,
-			subject: `【${env.APP_NAME || "FluxGate"}】验证码`,
+			subject: `【${env.APP_NAME || "SubFlow"}】验证码`,
 			text: `您的验证码是：${code}，10分钟内有效。如非本人操作，请忽略此邮件。`,
 		});
 	} catch (error) {
@@ -962,12 +962,12 @@ function buildProfileTitle(
 	const cleaned = (username || "user").replace(/[\r\n"]/g, "").trim() || "user";
 	if (format === "clash") {
 		const template = resolveClashTemplateId(clashTemplateId);
-		return `FluxGate-${cleaned}-clash-${template}`;
+		return `SubFlow-${cleaned}-clash-${template}`;
 	}
 	if (format === "v2ray-raw") {
-		return `FluxGate-${cleaned}-raw`;
+		return `SubFlow-${cleaned}-raw`;
 	}
-	return `FluxGate-${cleaned}-v2ray`;
+	return `SubFlow-${cleaned}-v2ray`;
 }
 
 function encodeFileName(value: string): string {

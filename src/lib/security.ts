@@ -8,7 +8,7 @@ import {
 import type { AppEnv } from "./types";
 
 const passwordIterations = 100_000;
-const sessionCookieName = "fluxgate_session";
+const sessionCookieName = "subflow_session";
 const keyCache = new Map<string, Promise<CryptoKey>>();
 
 export function getSessionCookieName(): string {

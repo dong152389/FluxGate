@@ -1,4 +1,4 @@
-# FluxGate
+# SubFlow
 
 一个面向个人和小团队的 VPN 订阅聚合项目。
 
@@ -6,7 +6,7 @@
 
 - 多订阅源聚合
 - 用户注册 / 登录
-- 每个用户独立配置与公开订阅 token
+- 每个用户独立配置与公开订阅链接
 - `vmess` / `vless` 节点解析与重命名
 - 去重
 - 单节点别名
@@ -59,7 +59,7 @@ npm run dev
 默认地址：
 
 - 管理台: `http://localhost:8787/`
-- 公开订阅: `http://localhost:8787/sub/{token}`
+- 公开订阅: `http://localhost:8787/sub/{订阅链接Id}`
 
 ## 部署到 Cloudflare
 
@@ -99,7 +99,7 @@ npm run cf-typegen
 - [public/styles.css](/C:/Users/dong5/Desktop/sub/public/styles.css): 前端样式
 - [src/index.ts](/C:/Users/dong5/Desktop/sub/src/index.ts): Worker API 路由
 - [src/lib/subscription.ts](/C:/Users/dong5/Desktop/sub/src/lib/subscription.ts): 订阅解析、去重、重命名与序列化
-- [src/lib/security.ts](/C:/Users/dong5/Desktop/sub/src/lib/security.ts): 密码哈希、URL 加密、token 工具
+- [src/lib/security.ts](/C:/Users/dong5/Desktop/sub/src/lib/security.ts): 密码哈希、URL 加密、订阅链接工具
 - [src/lib/data.ts](/C:/Users/dong5/Desktop/sub/src/lib/data.ts): D1 数据读写
 - [migrations/0001_init.sql](/C:/Users/dong5/Desktop/sub/migrations/0001_init.sql): 数据库结构
 
@@ -110,7 +110,7 @@ npm run cf-typegen
 - `vless://`
 - `vmess://`
 - 公开订阅自动格式协商：
-  - 默认 `v2rayN`：`/sub/{token}` 返回 Base64 订阅
+  - 默认 `v2rayN`：`/sub/{订阅链接Id}` 返回 Base64 订阅
   - `?raw=1`：返回明文 URI 列表
   - `?format=clash`：返回 Clash/Mihomo YAML
   - 若客户端 UA 含 `clash` / `mihomo` / `clash.meta` / `stash`，会自动返回 YAML

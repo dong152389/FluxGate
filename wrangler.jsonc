@@ -37,7 +37,7 @@
 		}
 	],
 	"vars": {
-		"APP_NAME": "FluxGate",
+		"APP_NAME": "SubFlow",
 		"SESSION_TTL_DAYS": "30",
 		"CACHE_TTL_SECONDS": "600"
 	},

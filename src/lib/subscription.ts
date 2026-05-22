@@ -208,7 +208,7 @@ async function fetchSourcePayload(url: string): Promise<string> {
 			method: "GET",
 			headers: {
 				accept: "text/plain, */*",
-				"user-agent": "FluxGate/1.0",
+				"user-agent": "SubFlow/1.0",
 			},
 			signal: controller.signal,
 		});
