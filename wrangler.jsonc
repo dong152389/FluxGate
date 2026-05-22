@@ -7,6 +7,12 @@
 	"name": "fluxgate-sub-aggregator",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-04-19",
+	"routes": [
+		{
+			"pattern": "sb.eastfond.com/*",
+			"zone_id": "0cec6e9f5c6ee84ddf452bc80a2954f8"
+		}
+	],
 	"compatibility_flags": [
 		"nodejs_compat",
 		"global_fetch_strictly_public"
