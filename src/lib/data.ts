@@ -9,7 +9,9 @@ import {
 } from "./security";
 import {
 	listClashTemplatePresets,
+	parseClashGroupOrder,
 	resolveClashTemplateId,
+	serializeClashGroupOrder,
 } from "./mihomo-template-presets";
 import type {
 	AdminUserListItem,
@@ -277,6 +279,9 @@ export async function getConfigResponse(
 		shortLabel: preset.shortLabel,
 		category: preset.category,
 		description: preset.description,
+		policyGroups: preset.policyGroups,
+		includeAutoSelect: preset.includeAutoSelect,
+		groupOrder: preset.groupOrder,
 		url: buildPublicClientUrl(request, env, settings.public_token, "clash", preset.id),
 		isDefault: preset.id === selectedTemplateId,
 	}));
@@ -298,13 +303,15 @@ export async function getConfigResponse(
 }
 
 export function settingsRowToConfig(settings: UserSettingsRow): UserSettingsConfig {
+	const clashTemplateId = resolveClashTemplateId(settings.clash_template_id);
 	return {
 		dedupeEnabled: Boolean(settings.dedupe_enabled),
 		prefixSourceName: Boolean(settings.prefix_source_name),
 		sourcePrefixTemplate: settings.source_prefix_template,
 		keepUnnamed: Boolean(settings.keep_unnamed),
 		sortMode: settings.sort_mode,
-		clashTemplateId: resolveClashTemplateId(settings.clash_template_id),
+		clashTemplateId,
+		clashGroupOrder: parseClashGroupOrder(settings.clash_group_order, clashTemplateId),
 	};
 }
 
@@ -315,6 +322,7 @@ export async function saveConfig(
 ): Promise<void> {
 	const db = env.DB;
 	const timestamp = nowIso();
+	const clashTemplateId = resolveClashTemplateId(payload.settings.clashTemplateId);
 
 	await db
 		.prepare(
@@ -325,6 +333,7 @@ export async function saveConfig(
 			     keep_unnamed = ?,
 			     sort_mode = ?,
 			     clash_template_id = ?,
+			     clash_group_order = ?,
 			     cache_version = cache_version + 1,
 			     updated_at = ?
 			 WHERE user_id = ?`,
@@ -335,7 +344,8 @@ export async function saveConfig(
 			payload.settings.sourcePrefixTemplate,
 			payload.settings.keepUnnamed ? 1 : 0,
 			payload.settings.sortMode,
-			resolveClashTemplateId(payload.settings.clashTemplateId),
+			clashTemplateId,
+			serializeClashGroupOrder(payload.settings.clashGroupOrder, clashTemplateId),
 			timestamp,
 			userId,
 		)

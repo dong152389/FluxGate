@@ -40,6 +40,7 @@ export interface UserSettingsRow {
 	keep_unnamed: number;
 	sort_mode: SortMode;
 	clash_template_id?: string | null;
+	clash_group_order?: string | null;
 	cache_version: number;
 	created_at: string;
 	updated_at: string;
@@ -153,6 +154,7 @@ export interface UserSettingsConfig {
 	keepUnnamed: boolean;
 	sortMode: SortMode;
 	clashTemplateId: string;
+	clashGroupOrder: string[];
 }
 
 export interface ClashTemplateLink {
@@ -161,6 +163,9 @@ export interface ClashTemplateLink {
 	shortLabel: string;
 	category: "fixed";
 	description: string;
+	policyGroups: string[];
+	includeAutoSelect: boolean;
+	groupOrder: string[];
 	url: string;
 	isDefault: boolean;
 }
@@ -199,6 +204,7 @@ export interface PreviewNode {
 	protocol: string;
 	sourceId: string;
 	sourceName: string;
+	sourcePriority: number;
 	originalName: string;
 	finalName: string;
 	alias: string;

@@ -3,7 +3,14 @@ import {
 	MIHOMO_TEMPLATE_GROUPS_PLACEHOLDER,
 	MIHOMO_TEMPLATE_PROXY_PLACEHOLDER,
 } from "./mihomo-template";
-import { getClashTemplatePreset, resolveClashTemplateId } from "./mihomo-template-presets";
+import {
+	CLASH_AUTO_GROUP_NAME,
+	CLASH_SELECT_GROUP_NAME,
+	getClashTemplatePreset,
+	parseClashGroupOrder,
+	resolveClashGroupOrder,
+	resolveClashTemplateId,
+} from "./mihomo-template-presets";
 import { sha256Base64Url } from "./security";
 import type {
 	AggregateResult,
@@ -90,6 +97,7 @@ export async function aggregateSourceRows(input: {
 			keepUnnamed: Boolean(input.settings.keep_unnamed),
 			sortMode: input.settings.sort_mode,
 			clashTemplateId: resolveClashTemplateId(input.settings.clash_template_id),
+			clashGroupOrder: parseClashGroupOrder(input.settings.clash_group_order, input.settings.clash_template_id),
 		},
 		aliases: input.aliases,
 	});
@@ -166,6 +174,7 @@ async function aggregateInternal(input: {
 			protocol: parsed.protocol,
 			sourceId: parsed.sourceId,
 			sourceName: parsed.sourceName,
+			sourcePriority: parsed.sourcePriority,
 			originalName,
 			finalName,
 			alias,
@@ -176,6 +185,8 @@ async function aggregateInternal(input: {
 
 	if (input.settings.sortMode === "name") {
 		nodes.sort((left, right) => left.finalName.localeCompare(right.finalName, "zh-Hans-CN"));
+	} else {
+		nodes.sort((left, right) => left.sourcePriority - right.sourcePriority || left.sourceName.localeCompare(right.sourceName, "zh-Hans-CN"));
 	}
 
 	const rawText = nodes.map((node) => node.finalUri).join("\n");
@@ -435,7 +446,7 @@ type ClashProxy = Record<string, string | number | boolean>;
 
 export function buildClashSubscription(
 	nodes: PreviewNode[],
-	options: { templateId?: string | null } = {},
+	options: { templateId?: string | null; groupOrder?: string[] | null } = {},
 ): ClashBuildResult {
 	const preset = getClashTemplatePreset(options.templateId);
 	const proxies: ClashProxy[] = [];
@@ -451,11 +462,8 @@ export function buildClashSubscription(
 		.map((proxy) => String(proxy.name))
 		.filter((value) => value.length > 0);
 	const proxySection = renderClashProxySection(proxies);
-	const proxyGroupsSection = renderClashProxyGroups(
-		names,
-		preset.policyGroups,
-		preset.includeAutoSelect,
-	);
+	const groupOrder = resolveClashGroupOrder(options.groupOrder, preset.id);
+	const proxyGroupsSection = renderClashProxyGroups(names, groupOrder, preset.includeAutoSelect);
 	const yamlText = preset.yamlTemplate
 		.replace(MIHOMO_TEMPLATE_PROXY_PLACEHOLDER, proxySection)
 		.replace(MIHOMO_TEMPLATE_GROUPS_PLACEHOLDER, proxyGroupsSection);
@@ -490,59 +498,65 @@ function renderClashProxySection(proxies: ClashProxy[]): string {
 
 function renderClashProxyGroups(
 	proxyNames: string[],
-	policyGroups: string[],
+	groupOrder: string[],
 	includeAutoSelect: boolean,
 ): string {
 	const normalizedNames = proxyNames.length > 0 ? proxyNames : ["DIRECT"];
 	const lines: string[] = [];
 
-	if (includeAutoSelect) {
-		lines.push(...renderAutoProxyGroup(normalizedNames));
-		lines.push(
-			...renderProxyGroup("🚀 节点选择", [
-				"⚡ 自动选择",
-				"DIRECT",
-				"REJECT",
-				...normalizedNames,
-			]),
-		);
-	} else {
-		lines.push(...renderProxyGroup("🚀 节点选择", ["DIRECT", ...normalizedNames]));
-	}
+	for (const name of groupOrder) {
+		if (name === CLASH_AUTO_GROUP_NAME) {
+			if (includeAutoSelect) {
+				lines.push(...renderAutoProxyGroup(normalizedNames));
+			}
+			continue;
+		}
 
-	for (const name of policyGroups) {
-		if (name === "🛑 广告拦截") {
-			lines.push(...renderProxyGroup(name, ["REJECT", "DIRECT", "🚀 节点选择"]));
-			continue;
-		}
-		if (name === "🏠 私有网络" || name === "🔒 国内服务") {
-			lines.push(
-				...renderProxyGroup(
-					name,
-					includeAutoSelect
-						? ["DIRECT", "REJECT", "🚀 节点选择", "⚡ 自动选择", ...normalizedNames]
-						: ["DIRECT", "🚀 节点选择"],
-				),
-			);
-			continue;
-		}
-		lines.push(
-			...renderProxyGroup(
-				name,
-				includeAutoSelect
-					? ["🚀 节点选择", "⚡ 自动选择", "DIRECT", "REJECT", ...normalizedNames]
-					: ["🚀 节点选择", "DIRECT"],
-			),
-		);
+		lines.push(...renderPolicyProxyGroup(name, normalizedNames, includeAutoSelect));
 	}
 
 	return lines.join("\n");
 }
 
+function renderPolicyProxyGroup(
+	name: string,
+	proxyNames: string[],
+	includeAutoSelect: boolean,
+): string[] {
+	if (name === CLASH_SELECT_GROUP_NAME) {
+		return renderProxyGroup(
+			name,
+			includeAutoSelect
+				? [CLASH_AUTO_GROUP_NAME, "DIRECT", "REJECT", ...proxyNames]
+				: ["DIRECT", ...proxyNames],
+		);
+	}
+
+	if (name === "🛑 广告拦截") {
+		return renderProxyGroup(name, ["REJECT", "DIRECT", CLASH_SELECT_GROUP_NAME]);
+	}
+
+	if (name === "🏠 私有网络" || name === "🔒 国内服务") {
+		return renderProxyGroup(
+			name,
+			includeAutoSelect
+				? ["DIRECT", "REJECT", CLASH_SELECT_GROUP_NAME, CLASH_AUTO_GROUP_NAME, ...proxyNames]
+				: ["DIRECT", CLASH_SELECT_GROUP_NAME],
+		);
+	}
+
+	return renderProxyGroup(
+		name,
+		includeAutoSelect
+			? [CLASH_SELECT_GROUP_NAME, CLASH_AUTO_GROUP_NAME, "DIRECT", "REJECT", ...proxyNames]
+			: [CLASH_SELECT_GROUP_NAME, "DIRECT"],
+	);
+}
+
 function renderAutoProxyGroup(proxyNames: string[]): string[] {
 	const deduped = Array.from(new Set(proxyNames.filter((value) => value.trim().length > 0)));
 	return [
-		`  - name: '${escapeYamlSingleQuoted("⚡ 自动选择")}'`,
+		`  - name: '${escapeYamlSingleQuoted(CLASH_AUTO_GROUP_NAME)}'`,
 		"    type: url-test",
 		"    proxies:",
 		...deduped.map((value) => `      - '${escapeYamlSingleQuoted(value)}'`),

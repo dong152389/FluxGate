@@ -17,9 +17,13 @@ export interface ClashTemplatePreset {
 	description: string;
 	yamlTemplate: string;
 	policyGroups: string[];
+	groupOrder: string[];
 	includeAutoSelect: boolean;
 	aliases: string[];
 }
+
+export const CLASH_AUTO_GROUP_NAME = "⚡ 自动选择";
+export const CLASH_SELECT_GROUP_NAME = "🚀 节点选择";
 
 const LITE_POLICY_GROUPS = [
 	"🛑 广告拦截",
@@ -482,7 +486,7 @@ rules:
   - MATCH,🐟 漏网之鱼
 `;
 
-const TEMPLATE_META: Record<ClashTemplateId, Omit<ClashTemplatePreset, "id">> = {
+const TEMPLATE_META: Record<ClashTemplateId, Omit<ClashTemplatePreset, "id" | "groupOrder">> = {
 	"fixed-lite": {
 		category: "fixed",
 		label: "固定模板 · 精简版",
@@ -551,9 +555,11 @@ export function resolveClashTemplateId(value: string | null | undefined): ClashT
 
 export function getClashTemplatePreset(value: string | null | undefined): ClashTemplatePreset {
 	const id = resolveClashTemplateId(value);
+	const preset = TEMPLATE_META[id];
 	return {
 		id,
-		...TEMPLATE_META[id],
+		...preset,
+		groupOrder: buildDefaultClashGroupOrder(preset.policyGroups, preset.includeAutoSelect),
 	};
 }
 
@@ -561,5 +567,69 @@ export function listClashTemplatePresets(): ClashTemplatePreset[] {
 	return TEMPLATE_ORDER.map((id) => ({
 		id,
 		...TEMPLATE_META[id],
+		groupOrder: buildDefaultClashGroupOrder(TEMPLATE_META[id].policyGroups, TEMPLATE_META[id].includeAutoSelect),
 	}));
+}
+
+export function getDefaultClashGroupOrder(value: string | null | undefined): string[] {
+	const preset = getClashTemplatePreset(value);
+	return [...preset.groupOrder];
+}
+
+export function resolveClashGroupOrder(
+	value: readonly string[] | null | undefined,
+	templateId: string | null | undefined,
+): string[] {
+	const defaults = getDefaultClashGroupOrder(templateId);
+	const allowed = new Set(defaults);
+	const seen = new Set<string>();
+	const ordered: string[] = [];
+
+	for (const raw of value ?? []) {
+		const name = typeof raw === "string" ? raw.trim() : "";
+		if (!name || !allowed.has(name) || seen.has(name)) {
+			continue;
+		}
+		seen.add(name);
+		ordered.push(name);
+	}
+
+	for (const name of defaults) {
+		if (!seen.has(name)) {
+			ordered.push(name);
+		}
+	}
+
+	return ordered;
+}
+
+export function parseClashGroupOrder(
+	value: string | null | undefined,
+	templateId: string | null | undefined,
+): string[] {
+	if (!value?.trim()) {
+		return getDefaultClashGroupOrder(templateId);
+	}
+
+	try {
+		const parsed = JSON.parse(value);
+		return resolveClashGroupOrder(Array.isArray(parsed) ? parsed : [], templateId);
+	} catch {
+		return getDefaultClashGroupOrder(templateId);
+	}
+}
+
+export function serializeClashGroupOrder(
+	value: readonly string[] | null | undefined,
+	templateId: string | null | undefined,
+): string {
+	return JSON.stringify(resolveClashGroupOrder(value, templateId));
+}
+
+function buildDefaultClashGroupOrder(policyGroups: string[], includeAutoSelect: boolean): string[] {
+	return [
+		...(includeAutoSelect ? [CLASH_AUTO_GROUP_NAME] : []),
+		CLASH_SELECT_GROUP_NAME,
+		...policyGroups,
+	];
 }

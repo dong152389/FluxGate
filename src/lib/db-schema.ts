@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
   keep_unnamed INTEGER NOT NULL DEFAULT 1,
   sort_mode TEXT NOT NULL DEFAULT 'source-priority',
   clash_template_id TEXT NOT NULL DEFAULT 'fixed-full',
+  clash_group_order TEXT,
   cache_version INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,

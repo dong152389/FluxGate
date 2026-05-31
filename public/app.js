@@ -174,7 +174,12 @@ document.addEventListener("click", async (event) => {
 				pushNotice("模板链接不存在", true);
 				return;
 			}
-			await copyText(template.url, `${template.shortLabel || template.label} 链接已复制`);
+			const groupOrder = resolveTemplateGroupOrder(
+				state.config?.settings?.clashGroupOrder,
+				template.id,
+				state.config,
+			);
+			await copyText(buildTemplatePreviewUrl(template.url, groupOrder), `${template.shortLabel || template.label} 链接已复制`);
 			return;
 		}
 
@@ -193,6 +198,16 @@ document.addEventListener("click", async (event) => {
 				return;
 			}
 			await copyText(summary.yamlText, "模板 YAML 已复制");
+			return;
+		}
+
+		if (action === "reset-template-groups") {
+			await resetSelectedTemplateGroupOrder();
+			return;
+		}
+
+		if (action === "move-template-group") {
+			await moveTemplateGroup(button.dataset.templateGroupMoveName || "", button.dataset.direction || "");
 			return;
 		}
 
@@ -434,7 +449,25 @@ document.addEventListener("change", async (event) => {
 	if (target.matches('[data-template-select]')) {
 		state.templatePreview.selectedTemplateId = target.value;
 		if (state.config?.settings) {
+			const templates = resolveClashTemplates(state.config);
+			const previousTemplate = templates.find((item) => item.id === state.config.settings.clashTemplateId);
+			const previousDefault = resolveTemplateGroupOrder(
+				[],
+				state.config.settings.clashTemplateId,
+				state.config,
+			);
+			const currentOrder = resolveTemplateGroupOrder(
+				state.config.settings.clashGroupOrder,
+				state.config.settings.clashTemplateId,
+				state.config,
+			);
+			const shouldResetOrder = !previousTemplate || arraysEqual(currentOrder, previousDefault);
 			state.config.settings.clashTemplateId = target.value;
+			state.config.settings.clashGroupOrder = resolveTemplateGroupOrder(
+				shouldResetOrder ? [] : state.config.settings.clashGroupOrder,
+				target.value,
+				state.config,
+			);
 		}
 		state.templatePreview.error = null;
 		render();
@@ -819,6 +852,9 @@ function renderTemplatesView() {
 		: null;
 	const metrics = summary?.metrics || null;
 	const groups = summary?.groups || [];
+	const groupOrder = selectedTemplate
+		? resolveTemplateGroupOrder(state.config.settings?.clashGroupOrder, selectedTemplate.id, state.config)
+		: [];
 	const actions = `
 		<button class="btn btn-primary btn-small" data-action="preview-template">生成预览</button>
 		<button class="btn btn-secondary btn-small" data-action="save-config">保存模板</button>
@@ -863,6 +899,7 @@ function renderTemplatesView() {
 							`).join("")
 							: `<div class="empty-state">当前没有可用模板。</div>`}
 					</div>
+					${selectedTemplate ? renderTemplateGroupOrderEditor(selectedTemplate, groupOrder) : ""}
 				</section>
 				<section class="card template-layout-right">
 					<div class="card-head">
@@ -921,6 +958,32 @@ function renderTemplatesView() {
 								`
 					}
 				</section>
+			</div>
+		</div>
+	`;
+}
+
+function renderTemplateGroupOrderEditor(template, groupOrder) {
+	return `
+		<div class="template-order-panel" data-editor="template-group-order" data-template-id="${escapeAttribute(template.id)}">
+			<div class="template-order-head">
+				<div>
+					<h3>策略组顺序</h3>
+					<p>用上移/下移调整，保存后同步到 Clash 导入顺序。</p>
+				</div>
+				<button class="btn btn-ghost btn-small" data-action="reset-template-groups">重置</button>
+			</div>
+			<div class="template-group-order-list" data-template-group-list>
+				${groupOrder.map((name, index) => `
+					<div class="template-group-order-item" data-template-group-name="${escapeAttribute(name)}">
+						<span class="item-index">${index + 1}</span>
+						<strong>${escapeHtml(name)}</strong>
+						<div class="template-group-move-actions">
+							<button class="template-group-move-btn" type="button" data-action="move-template-group" data-direction="up" data-template-group-move-name="${escapeAttribute(name)}" ${index === 0 ? "disabled" : ""} aria-label="上移 ${escapeAttribute(name)}">↑</button>
+							<button class="template-group-move-btn" type="button" data-action="move-template-group" data-direction="down" data-template-group-move-name="${escapeAttribute(name)}" ${index === groupOrder.length - 1 ? "disabled" : ""} aria-label="下移 ${escapeAttribute(name)}">↓</button>
+						</div>
+					</div>
+				`).join("")}
 			</div>
 		</div>
 	`;
@@ -1378,8 +1441,11 @@ function syncDraftConfig() {
 			keepUnnamed: document.getElementById("setting-keep-unnamed").checked,
 			sortMode: document.getElementById("setting-sort-mode").value,
 			clashTemplateId: state.config.settings?.clashTemplateId || "fixed-full",
+			clashGroupOrder: state.config.settings?.clashGroupOrder || [],
 		};
 	}
+
+	syncTemplateGroupOrderDraft();
 }
 
 function syncAuthDraft() {
@@ -1442,6 +1508,11 @@ function syncDraftPreview() {
 }
 
 async function saveConfig() {
+	syncTemplateGroupOrderDraft();
+	const selectedTemplateId = state.config?.settings?.clashTemplateId
+		|| state.templatePreview.selectedTemplateId
+		|| null;
+	const templatePreviewBeforeSave = { ...state.templatePreview };
 	const response = await api("/api/config", {
 		method: "PUT",
 		body: JSON.stringify({
@@ -1452,10 +1523,18 @@ async function saveConfig() {
 	});
 	state.config = response;
 	ensureConfigTemplateSetting(state.config);
+	const savedTemplateId = state.config?.settings?.clashTemplateId || selectedTemplateId;
+	state.templatePreview = {
+		...templatePreviewBeforeSave,
+		selectedTemplateId: savedTemplateId,
+		loading: false,
+	};
+	if (state.templatePreview.summary?.templateId !== savedTemplateId) {
+		state.templatePreview.summary = null;
+	}
 	if (state.config && !state.config.publicUrls) {
 		state.config.publicUrls = resolvePublicUrls(state.config);
 	}
-	resetTemplatePreview();
 	state.preview = null;
 	pushNotice("配置已保存");
 	render();
@@ -1792,6 +1871,11 @@ function ensureConfigTemplateSetting(config) {
 	if (!config.settings.clashTemplateId) {
 		config.settings.clashTemplateId = selected;
 	}
+	config.settings.clashGroupOrder = resolveTemplateGroupOrder(
+		config.settings.clashGroupOrder,
+		config.settings.clashTemplateId,
+		config,
+	);
 }
 
 function ensureTemplateSelection(templates) {
@@ -1816,6 +1900,76 @@ function resetTemplatePreview() {
 	state.templatePreview.summary = null;
 }
 
+function syncTemplateGroupOrderDraft() {
+	const editor = document.querySelector('[data-editor="template-group-order"]');
+	if (!editor || !state.config?.settings) {
+		return false;
+	}
+
+	const templateId = editor.dataset.templateId || state.config.settings.clashTemplateId || "fixed-full";
+	const previousTemplateId = state.config.settings.clashTemplateId || "fixed-full";
+	const previousOrder = resolveTemplateGroupOrder(
+		state.config.settings.clashGroupOrder,
+		previousTemplateId,
+		state.config,
+	);
+	const nextOrder = resolveTemplateGroupOrder(
+		[...editor.querySelectorAll("[data-template-group-name]")]
+			.map((item) => item.dataset.templateGroupName || "")
+			.filter(Boolean),
+		templateId,
+		state.config,
+	);
+	state.config.settings.clashTemplateId = templateId;
+	state.config.settings.clashGroupOrder = nextOrder;
+	return previousTemplateId !== templateId || !arraysEqual(previousOrder, nextOrder);
+}
+
+async function resetSelectedTemplateGroupOrder() {
+	if (!state.config?.settings) {
+		return;
+	}
+
+	const templateId = state.templatePreview.selectedTemplateId || state.config.settings.clashTemplateId || "fixed-full";
+	const previousOrder = resolveTemplateGroupOrder(state.config.settings.clashGroupOrder, templateId, state.config);
+	const nextOrder = resolveTemplateGroupOrder([], templateId, state.config);
+	state.config.settings.clashTemplateId = templateId;
+	state.config.settings.clashGroupOrder = nextOrder;
+	pushNotice("策略组顺序已重置，保存模板后生效");
+	if (!arraysEqual(previousOrder, nextOrder)) {
+		await refreshSelectedTemplatePreview();
+		return;
+	}
+	render();
+}
+
+async function moveTemplateGroup(name, direction) {
+	if (!state.config?.settings || !name) {
+		return;
+	}
+
+	const templateId = state.templatePreview.selectedTemplateId || state.config.settings.clashTemplateId || "fixed-full";
+	const currentOrder = resolveTemplateGroupOrder(state.config.settings.clashGroupOrder, templateId, state.config);
+	const index = currentOrder.indexOf(name);
+	const offset = direction === "up" ? -1 : direction === "down" ? 1 : 0;
+	const targetIndex = index + offset;
+	if (index < 0 || targetIndex < 0 || targetIndex >= currentOrder.length) {
+		return;
+	}
+
+	const nextOrder = [...currentOrder];
+	[nextOrder[index], nextOrder[targetIndex]] = [nextOrder[targetIndex], nextOrder[index]];
+	state.config.settings.clashTemplateId = templateId;
+	state.config.settings.clashGroupOrder = resolveTemplateGroupOrder(nextOrder, templateId, state.config);
+	await refreshSelectedTemplatePreview();
+}
+
+async function refreshSelectedTemplatePreview() {
+	const templateId = state.templatePreview.selectedTemplateId || state.config?.settings?.clashTemplateId || "fixed-full";
+	state.templatePreview.summary = null;
+	await loadTemplatePreview(templateId, { silentNotice: true });
+}
+
 async function loadTemplatePreview(templateId, options = {}) {
 	const { silentNotice = false } = options;
 	const templates = resolveClashTemplates(state.config);
@@ -1835,7 +1989,12 @@ async function loadTemplatePreview(templateId, options = {}) {
 	render();
 
 	try {
-		const response = await fetch(template.url, {
+		const groupOrder = resolveTemplateGroupOrder(
+			state.config?.settings?.clashGroupOrder,
+			template.id,
+			state.config,
+		);
+		const response = await fetch(buildTemplatePreviewUrl(template.url, groupOrder), {
 			method: "GET",
 			credentials: "same-origin",
 			headers: { accept: "text/yaml, text/plain, */*" },
@@ -2031,15 +2190,71 @@ function resolveClashTemplates(config) {
 			shortLabel: "完整版",
 			category: "fixed",
 			description: "兼容旧配置的默认模板链接。",
+			policyGroups: [],
+			includeAutoSelect: false,
+			groupOrder: ["🚀 节点选择"],
 			url: buildClashTemplateUrl(base, "fixed-full"),
 			isDefault: true,
 		}];
 	}
 
-	return templates.map((item) => ({
-		...item,
-		url: buildClashTemplateUrl(base, item.id || "fixed-full"),
-	}));
+	return templates.map((item) => {
+		const normalized = {
+			...item,
+			groupOrder: Array.isArray(item.groupOrder) && item.groupOrder.length
+				? item.groupOrder
+				: buildFallbackTemplateGroupOrder(item),
+		};
+		return {
+			...normalized,
+			url: buildClashTemplateUrl(base, normalized.id || "fixed-full"),
+		};
+	});
+}
+
+function resolveTemplateGroupOrder(groupOrder, templateId, config) {
+	const templates = resolveClashTemplates(config);
+	const template = templates.find((item) => item.id === templateId)
+		|| templates.find((item) => item.isDefault)
+		|| templates[0]
+		|| null;
+	const defaults = Array.isArray(template?.groupOrder) && template.groupOrder.length
+		? template.groupOrder
+		: buildFallbackTemplateGroupOrder(template);
+	const allowed = new Set(defaults);
+	const seen = new Set();
+	const ordered = [];
+
+	for (const raw of Array.isArray(groupOrder) ? groupOrder : []) {
+		const name = `${raw || ""}`.trim();
+		if (!name || !allowed.has(name) || seen.has(name)) {
+			continue;
+		}
+		seen.add(name);
+		ordered.push(name);
+	}
+
+	for (const name of defaults) {
+		if (!seen.has(name)) {
+			ordered.push(name);
+		}
+	}
+
+	return ordered;
+}
+
+function buildFallbackTemplateGroupOrder(template) {
+	if (!template) {
+		return ["🚀 节点选择"];
+	}
+
+	const policyGroups = Array.isArray(template.policyGroups) ? template.policyGroups : [];
+	const groups = [];
+	if (template.includeAutoSelect) {
+		groups.push("⚡ 自动选择");
+	}
+	groups.push("🚀 节点选择", ...policyGroups);
+	return groups;
 }
 
 function buildClashTemplateUrl(baseUrl, templateId) {
@@ -2055,4 +2270,26 @@ function buildClashTemplateUrl(baseUrl, templateId) {
 		const suffix = `${baseUrl}`.includes("?") ? "&" : "?";
 		return `${baseUrl}${suffix}format=clash&template=${encodeURIComponent(templateId || "fixed-full")}`;
 	}
+}
+
+function buildTemplatePreviewUrl(baseUrl, groupOrder) {
+	if (!baseUrl) {
+		return "";
+	}
+
+	try {
+		const target = new URL(baseUrl, window.location.origin);
+		target.searchParams.set("groupOrder", JSON.stringify(groupOrder || []));
+		return target.toString();
+	} catch {
+		const suffix = `${baseUrl}`.includes("?") ? "&" : "?";
+		return `${baseUrl}${suffix}groupOrder=${encodeURIComponent(JSON.stringify(groupOrder || []))}`;
+	}
+}
+
+function arraysEqual(left, right) {
+	if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+		return false;
+	}
+	return left.every((value, index) => value === right[index]);
 }

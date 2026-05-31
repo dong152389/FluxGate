@@ -42,7 +42,11 @@ import {
 	buildClashSubscription,
 	testSingleSource,
 } from "./lib/subscription";
-import { resolveClashTemplateId } from "./lib/mihomo-template-presets";
+import {
+	parseClashGroupOrder,
+	resolveClashGroupOrder,
+	resolveClashTemplateId,
+} from "./lib/mihomo-template-presets";
 import type {
 	AppEnv,
 	SaveConfigPayload,
@@ -553,7 +557,13 @@ async function handlePublicSubscription(
 	const clashTemplateId = format === "clash"
 		? resolvePublicClashTemplate(url, context.settings.clash_template_id)
 		: null;
-	const cacheKey = `subscription:${context.user.id}:${context.settings.cache_version}:${format}:${clashTemplateId ?? "-"}`;
+	const clashGroupOrder = format === "clash"
+		? resolvePublicClashGroupOrder(url, context.settings.clash_group_order, clashTemplateId)
+		: null;
+	const groupOrderCacheKey = clashGroupOrder
+		? await sha256Base64Url(clashGroupOrder.join("\n"))
+		: "-";
+	const cacheKey = `subscription:${context.user.id}:${context.settings.cache_version}:${format}:${clashTemplateId ?? "-"}:${groupOrderCacheKey}`;
 
 	if (env.CACHE) {
 		const cached = await env.CACHE.get(cacheKey);
@@ -586,7 +596,7 @@ async function handlePublicSubscription(
 	}
 
 	const clash = format === "clash"
-		? buildClashSubscription(aggregate.nodes, { templateId: clashTemplateId })
+		? buildClashSubscription(aggregate.nodes, { templateId: clashTemplateId, groupOrder: clashGroupOrder })
 		: null;
 	const payload = format === "v2ray-raw"
 		? aggregate.rawText
@@ -736,6 +746,8 @@ function sanitizeConfigPayload(input: SaveConfigPayload): SaveConfigPayload {
 	const prefixTemplate = prefixTemplateRaw.trim()
 		? prefixTemplateRaw
 		: "[{{source}}] ";
+	const clashTemplateId = resolveClashTemplateId(settings.clashTemplateId);
+	const clashGroupOrder = resolveClashGroupOrder(settings.clashGroupOrder, clashTemplateId);
 
 	const sources = Array.isArray(input.sources) ? input.sources.map(sanitizeSource) : [];
 	if (sources.length > 50) {
@@ -753,7 +765,8 @@ function sanitizeConfigPayload(input: SaveConfigPayload): SaveConfigPayload {
 			sourcePrefixTemplate: prefixTemplate,
 			keepUnnamed: Boolean(settings.keepUnnamed),
 			sortMode: settings.sortMode === "name" ? "name" : "source-priority",
-			clashTemplateId: resolveClashTemplateId(settings.clashTemplateId),
+			clashTemplateId,
+			clashGroupOrder,
 		},
 		sources,
 		renameRules,
@@ -922,6 +935,28 @@ function resolvePublicClashTemplate(
 ): string {
 	const explicit = (url.searchParams.get("template") || url.searchParams.get("tpl") || "").trim();
 	return explicit ? resolveClashTemplateId(explicit) : resolveClashTemplateId(defaultTemplateId);
+}
+
+function resolvePublicClashGroupOrder(
+	url: URL,
+	defaultGroupOrder: string | null | undefined,
+	templateId: string | null,
+): string[] {
+	const explicit = (url.searchParams.get("groupOrder") || url.searchParams.get("groups") || "").trim();
+	if (!explicit) {
+		return parseClashGroupOrder(defaultGroupOrder, templateId);
+	}
+
+	try {
+		const parsed = JSON.parse(explicit);
+		if (Array.isArray(parsed)) {
+			return resolveClashGroupOrder(parsed, templateId);
+		}
+	} catch {
+		// Fall through to comma-separated handling.
+	}
+
+	return resolveClashGroupOrder(explicit.split(","), templateId);
 }
 
 function subscriptionHeaders(
