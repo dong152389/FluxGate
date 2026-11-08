@@ -68,7 +68,15 @@ npm run typecheck
 
 ## Docker 容器化部署
 
-项目中已提供 `docker-compose.yml`，可配合已有 MySQL 容器或独立部署：
+1. 准备环境变量文件
+
+```bash
+cp .env.example .env
+```
+
+根据实际环境修改 `.env` 中的 MySQL 连接信息和密钥。
+
+2. 启动服务
 
 ```bash
 docker compose up -d

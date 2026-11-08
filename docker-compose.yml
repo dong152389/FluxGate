@@ -4,44 +4,12 @@ services:
     container_name: subflow
     restart: unless-stopped
     ports:
-      - "80:80"
-    environment:
-      # 服务监听端口（容器内部默认 80）
-      - PORT=80
-      # 数据加密密钥（请修改为随机复杂字符串，用于安全加密存储订阅等信息）
-      - APP_SECRET=replace-with-your-strong-random-secret
-      # 对外访问地址（用于生成公开订阅链接，填入你的公网 IP 或域名，不要带末尾斜杠）
-      - PUBLIC_BASE_URL=http://your-server-ip
-
-      # MySQL 数据库配置
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_USER=fluxgate
-      - MYSQL_PASSWORD=fluxgate_password
-      - MYSQL_DATABASE=fluxgate
-      # 也可以直接使用数据库连接 URL：
-      # - MYSQL_URL=mysql://fluxgate:fluxgate_password@mysql:3306/fluxgate
-
-      # 会话与缓存配置
-      - SESSION_TTL_DAYS=30
-      - CACHE_TTL_SECONDS=600
-
-      # 邮件服务配置（可选，如需注册验证码功能可取消注释）
-      # - SMTP_HOST=smtp.example.com
-      # - SMTP_PORT=465
-      # - SMTP_USER=user@example.com
-      # - SMTP_PASS=password
-      # - SMTP_FROM=FluxGate <no-reply@example.com>
-      # - EMAIL_WHITELIST=
+      - "${PORT:-80}:${PORT:-80}"
+    env_file:
+      - .env
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-80}/"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-    networks:
-      - 1panel-network
-
-networks:
-  1panel-network:
-    external: true
