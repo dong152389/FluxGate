@@ -15,6 +15,7 @@ import {
 	findUserByUsername,
 	getConfigResponse,
 	getPublicSubscriptionContext,
+	initDefaultAdmin,
 	isAdmin,
 	listAliases,
 	listAllUsers,
@@ -96,7 +97,7 @@ async function routeRequest(
 
 	if (request.method === "GET" && url.pathname === "/api/auth/me") {
 		const user = await requireUser(request, env);
-		const admin = await isAdmin(env.DB, user.id);
+		const admin = await isAdmin(env, user.id);
 		return json({ user: { ...user, isAdmin: admin } });
 	}
 
@@ -424,7 +425,7 @@ async function verifyCode(
 
 async function requireVerifiedUser(request: Request, env: AppEnv): Promise<UserProfile> {
 	const user = await requireUser(request, env);
-	const admin = await isAdmin(env.DB, user.id);
+	const admin = await isAdmin(env, user.id);
 	if (!admin && !user.emailVerified) {
 		throw new HttpError(403, "请先验证邮箱");
 	}
@@ -632,7 +633,7 @@ async function requireUser(request: Request, env: AppEnv): Promise<UserProfile> 
 
 async function requireAdmin(request: Request, env: AppEnv): Promise<UserProfile> {
 	const user = await requireUser(request, env);
-	const admin = await isAdmin(env.DB, user.id);
+	const admin = await isAdmin(env, user.id);
 	if (!admin) {
 		throw new HttpError(403, "需要管理员权限");
 	}
@@ -641,7 +642,7 @@ async function requireAdmin(request: Request, env: AppEnv): Promise<UserProfile>
 
 async function handleListUsers(request: Request, env: AppEnv): Promise<Response> {
 	await requireAdmin(request, env);
-	const users = await listAllUsers(env.DB);
+	const users = await listAllUsers(env);
 	return json({ users });
 }
 
@@ -724,7 +725,7 @@ async function makeSessionResponse(
 	const secure = new URL(request.url).protocol === "https:";
 	const sessionUser = {
 		...user,
-		isAdmin: await isAdmin(env.DB, user.id),
+		isAdmin: await isAdmin(env, user.id),
 	};
 	const config = await getConfigResponse(request, env, sessionUser);
 
@@ -1110,6 +1111,9 @@ export async function startServer(): Promise<void> {
 		PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
 		SESSION_TTL_DAYS: process.env.SESSION_TTL_DAYS || "30",
 		CACHE_TTL_SECONDS: process.env.CACHE_TTL_SECONDS || "600",
+		ADMIN_USERNAME: process.env.ADMIN_USERNAME || "admin",
+		ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
+		ADMIN_EMAIL: process.env.ADMIN_EMAIL,
 		SMTP_HOST: process.env.SMTP_HOST,
 		SMTP_PORT: process.env.SMTP_PORT,
 		SMTP_USER: process.env.SMTP_USER,
@@ -1117,6 +1121,8 @@ export async function startServer(): Promise<void> {
 		SMTP_FROM: process.env.SMTP_FROM,
 		EMAIL_WHITELIST: process.env.EMAIL_WHITELIST,
 	};
+
+	await initDefaultAdmin(env);
 
 	const publicDir = resolve(process.cwd(), "public");
 	const port = Number.parseInt(process.env.PORT || "80", 10);

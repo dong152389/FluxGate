@@ -7,6 +7,8 @@ import {
 	randomId,
 	randomToken,
 	sha256Base64Url,
+	hashPassword,
+	verifyPassword,
 } from "./security";
 import {
 	listClashTemplatePresets,
@@ -475,18 +477,114 @@ export async function getSettingsOrThrow(
 	return settings;
 }
 
-export async function isAdmin(db: DatabaseClient, userId: string): Promise<boolean> {
+export async function initDefaultAdmin(env: AppEnv): Promise<void> {
+	const username = (env.ADMIN_USERNAME || "").trim();
+	const password = env.ADMIN_PASSWORD || "";
+	if (!username || !password) {
+		return;
+	}
+
+	if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(username)) {
+		console.warn(`[FluxGate] ADMIN_USERNAME "${username}" 不合法（需为 3-32 位字母、数字、下划线、点或短横线）`);
+		return;
+	}
+
+	if (password.length < 8 || password.length > 128) {
+		console.warn("[FluxGate] ADMIN_PASSWORD 长度需在 8 到 128 位之间");
+		return;
+	}
+
+	const db = env.DB;
+	const existingUser = await findUserByUsername(db, username);
+
+	if (existingUser) {
+		const matches = await verifyPassword(
+			password,
+			existingUser.password_hash,
+			existingUser.password_salt,
+		);
+		if (!matches) {
+			const { hash, salt } = await hashPassword(password);
+			await db.execute(
+				"UPDATE users SET password_hash = ?, password_salt = ?, status = 'active', email_verified = 1, updated_at = ? WHERE id = ?",
+				[hash, salt, nowIso(), existingUser.id],
+			);
+			console.log(`[FluxGate] 默认超级管理员 "${username}" 密码已更新为 .env 配置。`);
+		} else if (existingUser.status !== "active" || !existingUser.email_verified) {
+			await db.execute(
+				"UPDATE users SET status = 'active', email_verified = 1, updated_at = ? WHERE id = ?",
+				[nowIso(), existingUser.id],
+			);
+		}
+		return;
+	}
+
+	let email = (env.ADMIN_EMAIL || "").trim() || null;
+	if (email) {
+		const existingEmail = await findUserByEmail(db, email);
+		if (existingEmail) {
+			console.warn(`[FluxGate] ADMIN_EMAIL "${email}" 已被占用，管理员账号将不绑定该邮箱`);
+			email = null;
+		}
+	}
+
+	const { hash, salt } = await hashPassword(password);
+	const userId = randomId();
+	const createdAt = "2000-01-01T00:00:00.000Z";
+	const timestamp = nowIso();
+
+	await db.execute(
+		"INSERT INTO users (id, username, email, email_verified, password_hash, password_salt, status, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, 'active', ?, ?)",
+		[userId, username, email, hash, salt, createdAt, timestamp],
+	);
+
+	await db.execute(
+		"INSERT INTO user_settings (user_id, public_token, dedupe_enabled, prefix_source_name, source_prefix_template, keep_unnamed, sort_mode, clash_template_id, clash_group_order, cache_version, created_at, updated_at) VALUES (?, ?, 1, 1, '[{{source}}] ', 1, 'source-priority', 'fixed-full', NULL, 1, ?, ?)",
+		[userId, randomToken(24), createdAt, timestamp],
+	);
+
+	console.log(`[FluxGate] 默认超级管理员 "${username}" 初始化成功。`);
+}
+
+export async function isAdmin(
+	envOrDb: AppEnv | DatabaseClient,
+	userId: string,
+): Promise<boolean> {
+	const db = "DB" in envOrDb ? envOrDb.DB : envOrDb;
+	const adminUsername = "DB" in envOrDb ? envOrDb.ADMIN_USERNAME?.trim() : undefined;
+
+	if (adminUsername) {
+		const adminUser = await db.queryRow<{ id: string }>(
+			"SELECT id FROM users WHERE username = ?",
+			[adminUsername],
+		);
+		if (adminUser) {
+			return adminUser.id === userId;
+		}
+	}
+
 	const firstUser = await db.queryRow<{ id: string }>(
 		"SELECT id FROM users ORDER BY created_at ASC LIMIT 1",
 	);
 	return firstUser ? firstUser.id === userId : false;
 }
 
-export async function listAllUsers(db: DatabaseClient): Promise<AdminUserListItem[]> {
+export async function listAllUsers(
+	envOrDb: AppEnv | DatabaseClient,
+): Promise<AdminUserListItem[]> {
+	const db = "DB" in envOrDb ? envOrDb.DB : envOrDb;
+	const adminUsername = "DB" in envOrDb ? envOrDb.ADMIN_USERNAME?.trim() : undefined;
+
 	const rows = await db.query<AdminUserListItem>(
 		"SELECT id, username, email, status, created_at, updated_at FROM users ORDER BY created_at ASC",
 	);
-	return rows.map((user, index) => ({ ...user, isAdmin: index === 0 }));
+	const hasConfiguredAdmin = Boolean(
+		adminUsername && rows.some((u) => u.username === adminUsername),
+	);
+	return rows.map((user, index) => ({
+		...user,
+		isAdmin: hasConfiguredAdmin ? user.username === adminUsername : index === 0,
+	}));
 }
 
 export async function updateUserStatus(

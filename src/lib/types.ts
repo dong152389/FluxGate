@@ -17,6 +17,9 @@ export interface AppEnv {
 	PUBLIC_BASE_URL?: string;
 	SESSION_TTL_DAYS?: string;
 	CACHE_TTL_SECONDS?: string;
+	ADMIN_USERNAME?: string;
+	ADMIN_PASSWORD?: string;
+	ADMIN_EMAIL?: string;
 	SMTP_HOST?: string;
 	SMTP_PORT?: string;
 	SMTP_USER?: string;

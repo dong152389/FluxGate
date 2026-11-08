@@ -89,6 +89,9 @@ docker compose up -d
 | `PORT` | 监听端口 | `80` |
 | `APP_SECRET` | 数据加密密钥（请修改为随机高强度字符串） | - |
 | `PUBLIC_BASE_URL` | 公开访问基础域名或 IP | `http://localhost:80` |
+| `ADMIN_USERNAME` | 默认超级管理员用户名 | `admin` |
+| `ADMIN_PASSWORD` | 默认超级管理员密码（建议首次部署时设置） | - |
+| `ADMIN_EMAIL` | 默认超级管理员邮箱（可选） | - |
 | `MYSQL_HOST` | MySQL 主机地址 | `localhost` |
 | `MYSQL_PORT` | MySQL 端口 | `3306` |
 | `MYSQL_USER` | MySQL 用户名 | `root` |
