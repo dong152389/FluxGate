@@ -396,6 +396,7 @@ async function handleSendCode(request: Request, env: AppEnv): Promise<Response> 
 			text: `您的验证码是：${code}，10分钟内有效。如非本人操作，请忽略此邮件。`,
 		});
 	} catch (error) {
+		console.error("[FluxGate] Failed to send email:", error);
 		const message = error instanceof Error ? error.message : "邮件发送失败";
 		return apiError(500, message);
 	}
