@@ -1,0 +1,11 @@
+node_modules
+.git
+.idea
+.vscode
+.wrangler
+*.log
+*.err.log
+.dev.vars
+.env
+dist
+coverage

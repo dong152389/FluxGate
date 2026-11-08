@@ -1,0 +1,26 @@
+services:
+  subflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: subflow:latest
+    container_name: subflow
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    environment:
+      - PORT=80
+      - APP_SECRET=change-this-secret-before-deploy
+      - PUBLIC_BASE_URL=http://your-server-ip
+      # SMTP Configuration (Optional)
+      # - SMTP_HOST=smtp.example.com
+      # - SMTP_PORT=465
+      # - SMTP_USER=user@example.com
+      # - SMTP_PASS=password
+      # - SMTP_FROM=SubFlow <no-reply@example.com>
+      # - EMAIL_WHITELIST=
+    volumes:
+      - subflow_data:/app/data
+
+volumes:
+  subflow_data:
