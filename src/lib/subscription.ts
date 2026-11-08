@@ -383,7 +383,8 @@ function clashProxyToUri(proxy: Record<string, unknown>): string | null {
 		const wsHeaders = (typeof wsOpts.headers === "object" && wsOpts.headers ? wsOpts.headers : {}) as Record<string, unknown>;
 		const host = String(wsHeaders.Host || wsHeaders.host || proxy.servername || "");
 		const path = String(wsOpts.path || "");
-		const payload = {
+		const skipCertVerify = Boolean(proxy["skip-cert-verify"] || proxy.skipCertVerify || proxy.insecure);
+		const payload: Record<string, unknown> = {
 			v: "2",
 			ps: name,
 			add: server,
@@ -399,6 +400,12 @@ function clashProxyToUri(proxy: Record<string, unknown>): string | null {
 			sni: String(proxy.servername || proxy.sni || host),
 			alpn: Array.isArray(proxy.alpn) ? proxy.alpn.join(",") : String(proxy.alpn || ""),
 		};
+		if (skipCertVerify) {
+			payload["skip-cert-verify"] = "true";
+		}
+		if (proxy.udp !== undefined) {
+			payload.udp = String(Boolean(proxy.udp));
+		}
 		return `vmess://${utf8ToBase64(JSON.stringify(payload))}`;
 	}
 
@@ -406,6 +413,12 @@ function clashProxyToUri(proxy: Record<string, unknown>): string | null {
 		const uuid = String(proxy.uuid || "");
 		const params = new URLSearchParams();
 		params.set("type", String(proxy.network || "tcp"));
+		if (proxy["skip-cert-verify"] || proxy.skipCertVerify || proxy.insecure) {
+			params.set("insecure", "1");
+		}
+		if (proxy.udp !== undefined) {
+			params.set("udp", String(Boolean(proxy.udp)));
+		}
 		if (proxy.tls) {
 			const realityOpts = (typeof proxy["reality-opts"] === "object" && proxy["reality-opts"] ? proxy["reality-opts"] : {}) as Record<string, unknown>;
 			if (realityOpts["public-key"] || realityOpts.publicKey) {
@@ -482,7 +495,8 @@ function clashProxyToUri(proxy: Record<string, unknown>): string | null {
 		const password = String(proxy.password || "");
 		const params = new URLSearchParams();
 		if (proxy.sni) params.set("sni", String(proxy.sni));
-		if (proxy["skip-cert-verify"] || proxy.insecure) params.set("allowInsecure", "1");
+		if (proxy["skip-cert-verify"] || proxy.skipCertVerify || proxy.insecure) params.set("allowInsecure", "1");
+		if (proxy.udp !== undefined) params.set("udp", String(Boolean(proxy.udp)));
 		if (proxy.alpn) params.set("alpn", Array.isArray(proxy.alpn) ? proxy.alpn.join(",") : String(proxy.alpn));
 		return `trojan://${encodeURIComponent(password)}@${server}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
 	}
@@ -510,7 +524,7 @@ function singboxOutboundToUri(outbound: Record<string, unknown>): string | null 
 		const hostArr = wsHeaders.Host || wsHeaders.host || [];
 		const host = Array.isArray(hostArr) ? String(hostArr[0]) : (hostArr ? String(hostArr) : String(tls.server_name || ""));
 		const path = String(transport.path || "");
-		const payload = {
+		const payload: Record<string, unknown> = {
 			v: "2",
 			ps: tag,
 			add: server,
@@ -526,6 +540,9 @@ function singboxOutboundToUri(outbound: Record<string, unknown>): string | null 
 			sni: String(tls.server_name || host),
 			alpn: Array.isArray(tls.alpn) ? tls.alpn.join(",") : String(tls.alpn || ""),
 		};
+		if (tls.insecure) {
+			payload["skip-cert-verify"] = "true";
+		}
 		return `vmess://${utf8ToBase64(JSON.stringify(payload))}`;
 	}
 
@@ -1022,11 +1039,15 @@ function parseVmessToClash(node: PreviewNode): ClashProxy | null {
 		alterId: Number.parseInt(payload.aid || "0", 10) || 0,
 		cipher: payload.scy || "auto",
 		tls: isTruthy(payload.tls),
-		udp: true,
+		udp: payload.udp !== undefined ? parseBooleanLike(String(payload.udp)) ?? true : true,
+		network: ["tcp", "ws", "grpc", "http", "h2"].includes(network) ? network : "tcp",
 	};
 
-	if (network === "ws" || network === "grpc" || network === "http" || network === "h2") {
-		proxy.network = network;
+	const skipCertVerify = parseBooleanLike(
+		String(payload["skip-cert-verify"] ?? payload["skip_cert_verify"] ?? payload.insecure ?? payload.allowInsecure ?? ""),
+	);
+	if (skipCertVerify !== null) {
+		proxy["skip-cert-verify"] = skipCertVerify;
 	}
 
 	const wsPath = payload.path?.trim() || "";
@@ -1081,16 +1102,24 @@ function parseVlessToClash(node: PreviewNode): ClashProxy | null {
 		security === "reality" ||
 		(network === "ws" && security === "tls");
 
+	const vlessUdp = parseBooleanLike(firstQuery(urlValue, ["udp"]));
 	const proxy: ClashProxy = {
 		name: node.finalName || server,
 		type: "vless",
 		server,
 		port,
 		uuid,
-		udp: true,
+		udp: vlessUdp !== null ? vlessUdp : true,
 		tls: tlsEnabled,
 		network: ["tcp", "ws", "grpc", "http", "h2"].includes(network) ? network : "tcp",
 	};
+
+	const skipCertVerify = parseBooleanLike(
+		firstQuery(urlValue, ["skip-cert-verify", "skip_cert_verify", "insecure", "allowinsecure"]),
+	);
+	if (skipCertVerify !== null) {
+		proxy["skip-cert-verify"] = skipCertVerify;
+	}
 
 	const flow = firstQuery(urlValue, ["flow"]) || "";
 	if (flow) {
@@ -1177,16 +1206,24 @@ function parseTrojanToClash(node: PreviewNode): ClashProxy | null {
 	}
 
 	const network = (urlValue.searchParams.get("type") || "tcp").toLowerCase();
+	const trojanUdp = parseBooleanLike(firstQuery(urlValue, ["udp"]));
 	const proxy: ClashProxy = {
 		name: node.finalName || server,
 		type: "trojan",
 		server,
 		port,
 		password,
-		udp: true,
+		udp: trojanUdp !== null ? trojanUdp : true,
 		tls: true,
 		network: ["tcp", "ws", "grpc"].includes(network) ? network : "tcp",
 	};
+
+	const skipCertVerify = parseBooleanLike(
+		firstQuery(urlValue, ["skip-cert-verify", "skip_cert_verify", "insecure", "allowinsecure"]),
+	);
+	if (skipCertVerify !== null) {
+		proxy["skip-cert-verify"] = skipCertVerify;
+	}
 
 	const sni = urlValue.searchParams.get("sni") || "";
 	if (sni) {
@@ -1701,6 +1738,18 @@ function escapeYamlSingleQuoted(input: string): string {
 	return input.replace(/'/g, "''");
 }
 
+const YAML_SPECIAL_LITERALS = new Set([
+	"true",
+	"false",
+	"yes",
+	"no",
+	"on",
+	"off",
+	"null",
+	"y",
+	"n",
+]);
+
 function toYamlScalar(value: string | number | boolean): string {
 	if (typeof value === "boolean" || typeof value === "number") {
 		return String(value);
@@ -1713,5 +1762,10 @@ function toYamlScalar(value: string | number | boolean): string {
 	) {
 		return trimmed;
 	}
+
+	if (/^[a-zA-Z0-9_.-]+$/.test(trimmed) && !YAML_SPECIAL_LITERALS.has(trimmed.toLowerCase())) {
+		return trimmed;
+	}
+
 	return `'${escapeYamlSingleQuoted(value)}'`;
 }
