@@ -586,7 +586,7 @@ async function handlePublicSubscription(
 		const cached = await env.CACHE.get(cacheKey);
 		if (cached !== null) {
 			return new Response(cached, {
-				headers: subscriptionHeaders(format, context.user.username, clashTemplateId),
+				headers: subscriptionHeaders(format, context.user.username, clashTemplateId, env),
 			});
 		}
 	}
@@ -631,7 +631,7 @@ async function handlePublicSubscription(
 	}
 
 	return new Response(payload, {
-		headers: subscriptionHeaders(format, context.user.username, clashTemplateId),
+		headers: subscriptionHeaders(format, context.user.username, clashTemplateId, env),
 	});
 }
 
@@ -987,8 +987,10 @@ function subscriptionHeaders(
 	format: PublicFormat,
 	username?: string,
 	clashTemplateId?: string | null,
+	env?: AppEnv,
 ): Record<string, string> {
-	const profileTitle = buildProfileTitle(format, username, clashTemplateId);
+	const profileTitle = buildProfileTitle(format, username, clashTemplateId, env);
+	const fileName = encodeFileName(profileTitle);
 	if (format === "clash") {
 		return {
 			"content-type": "text/yaml; charset=UTF-8",
@@ -996,7 +998,7 @@ function subscriptionHeaders(
 			"x-subscription-format": "clash",
 			"x-clash-template": resolveClashTemplateId(clashTemplateId),
 			"profile-title": profileTitle,
-			"content-disposition": `attachment; filename="${encodeFileName(profileTitle)}.yaml"`,
+			"content-disposition": `attachment; filename=${fileName}.yaml; filename*=UTF-8''${encodeURIComponent(profileTitle)}.yaml`,
 		};
 	}
 
@@ -1005,7 +1007,7 @@ function subscriptionHeaders(
 		"cache-control": "no-store",
 		"x-subscription-format": format === "v2ray-raw" ? "raw" : "base64",
 		"profile-title": profileTitle,
-		"content-disposition": `attachment; filename="${encodeFileName(profileTitle)}.txt"`,
+		"content-disposition": `attachment; filename=${fileName}.txt; filename*=UTF-8''${encodeURIComponent(profileTitle)}.txt`,
 	};
 }
 
@@ -1013,16 +1015,11 @@ function buildProfileTitle(
 	format: PublicFormat,
 	username?: string,
 	clashTemplateId?: string | null,
+	env?: AppEnv,
 ): string {
-	const cleaned = (username || "user").replace(/[\r\n"]/g, "").trim() || "user";
-	if (format === "clash") {
-		const template = resolveClashTemplateId(clashTemplateId);
-		return `FluxGate-${cleaned}-clash-${template}`;
-	}
-	if (format === "v2ray-raw") {
-		return `FluxGate-${cleaned}-raw`;
-	}
-	return `FluxGate-${cleaned}-v2ray`;
+	const raw = env?.SUB_PROFILE_TITLE || env?.APP_NAME || "East Sub";
+	const sanitized = String(raw).replace(new RegExp("[\r\n\\\"\x27]", "g"), "").trim();
+	return sanitized || "East Sub";
 }
 
 function encodeFileName(value: string): string {
@@ -1117,7 +1114,8 @@ export async function startServer(): Promise<void> {
 		DB: db,
 		CACHE: new MemoryCacheStore(),
 		APP_SECRET: process.env.APP_SECRET || "change-this-secret-before-deploy",
-		APP_NAME: process.env.APP_NAME || "FluxGate",
+		APP_NAME: process.env.APP_NAME || "East Sub",
+		SUB_PROFILE_TITLE: process.env.SUB_PROFILE_TITLE || process.env.APP_NAME || "East Sub",
 		PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
 		SESSION_TTL_DAYS: process.env.SESSION_TTL_DAYS || "30",
 		CACHE_TTL_SECONDS: process.env.CACHE_TTL_SECONDS || "600",

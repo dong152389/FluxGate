@@ -24,13 +24,14 @@ export async function sendSmtpEmail(
 	options: { to: string; subject: string; text: string; html?: string },
 ): Promise<void> {
 	const host = env.SMTP_HOST?.trim();
-	const from = env.SMTP_FROM?.trim();
+	const rawFrom = env.SMTP_FROM?.trim();
 	const user = env.SMTP_USER?.trim() || "";
 	const pass = env.SMTP_PASS?.trim() || "";
-	if (!host || !from || !user || !pass) {
+	if (!host || !rawFrom || !user || !pass) {
 		throw new Error("SMTP 配置不完整");
 	}
 
+	const from = resolveSmtpFrom(rawFrom, host, user);
 	const port = parseSmtpPort(env.SMTP_PORT);
 	const secure = port === 465;
 
@@ -54,6 +55,23 @@ export async function sendSmtpEmail(
 		text: options.text,
 		html: options.html,
 	});
+}
+
+function resolveSmtpFrom(rawFrom: string, host: string, user: string): string {
+	if (!user || !user.includes("@")) {
+		return rawFrom;
+	}
+	// QQ 邮箱、163/126 邮箱等国内服务商要求发信邮箱必须与登录认证账号一致，否则会直接切断连接 (Connection closed unexpectedly)
+	const isStrictProvider = /(?:qq.com|163.com|126.com|yeah.net|foxmail.com)/i.test(host) ||
+		/(?:qq.com|163.com|126.com|yeah.net|foxmail.com)/i.test(user);
+
+	if (isStrictProvider) {
+		const match = rawFrom.match(new RegExp("^([^<>]*?)\s*<.*?>$"));
+		const displayName = match ? match[1].trim() : "";
+		return displayName ? `${displayName} <${user}>` : user;
+	}
+
+	return rawFrom;
 }
 
 async function sendWebhookEmail(

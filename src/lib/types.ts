@@ -14,6 +14,7 @@ export interface AppEnv {
 	CACHE?: CacheStore;
 	APP_SECRET?: string;
 	APP_NAME?: string;
+	SUB_PROFILE_TITLE?: string;
 	PUBLIC_BASE_URL?: string;
 	SESSION_TTL_DAYS?: string;
 	CACHE_TTL_SECONDS?: string;
