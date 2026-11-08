@@ -213,19 +213,25 @@ export async function getConfigResponse(
 	const renameRuleRows = await listRenameRules(env.DB, user.id);
 
 	const sources = await Promise.all(
-		sourceRows.map(async (source) => ({
-			id: source.id,
-			name: source.name,
-			v2rayUrl: source.v2ray_url_encrypted
+		sourceRows.map(async (source) => {
+			const v2rayDecrypted = source.v2ray_url_encrypted
 				? await decryptText(source.v2ray_url_encrypted, env)
-				: "",
-			clashUrl: source.clash_url_encrypted
+				: "";
+			const clashDecrypted = source.clash_url_encrypted
 				? await decryptText(source.clash_url_encrypted, env)
-				: "",
-			enabled: Boolean(source.enabled),
-			priority: source.priority,
-			notes: source.notes ?? "",
-		} satisfies SourceConfig)),
+				: "";
+			const unifiedUrl = v2rayDecrypted || clashDecrypted;
+			return {
+				id: source.id,
+				name: source.name,
+				url: unifiedUrl,
+				v2rayUrl: unifiedUrl,
+				clashUrl: "",
+				enabled: Boolean(source.enabled),
+				priority: source.priority,
+				notes: source.notes ?? "",
+			} satisfies SourceConfig;
+		}),
 	);
 
 	const renameRules = renameRuleRows.map(
@@ -320,6 +326,7 @@ export async function saveConfig(
 
 	await db.execute("DELETE FROM sources WHERE user_id = ?", [userId]);
 	for (const source of payload.sources) {
+		const targetUrl = (source.url || source.v2rayUrl || source.clashUrl || "").trim();
 		await db.execute(
 			`INSERT INTO sources
 			 (id, user_id, name, v2ray_url_encrypted, clash_url_encrypted, enabled, priority, notes, created_at, updated_at)
@@ -328,8 +335,8 @@ export async function saveConfig(
 				source.id,
 				userId,
 				source.name,
-				source.v2rayUrl ? await encryptText(source.v2rayUrl, env) : null,
-				source.clashUrl ? await encryptText(source.clashUrl, env) : null,
+				targetUrl ? await encryptText(targetUrl, env) : null,
+				null,
 				source.enabled ? 1 : 0,
 				source.priority,
 				source.notes,

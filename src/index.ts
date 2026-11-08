@@ -454,11 +454,13 @@ async function handleSaveConfig(request: Request, env: AppEnv): Promise<Response
 async function handleTestSource(request: Request, env: AppEnv): Promise<Response> {
 	await requireVerifiedUser(request, env);
 	const body = await readJson<Partial<SourceConfig>>(request);
+	const targetUrl = (body.url || body.v2rayUrl || body.clashUrl || "").trim();
 	const source = sanitizeSource({
 		id: body.id ?? crypto.randomUUID(),
 		name: body.name ?? "未命名来源",
-		v2rayUrl: body.v2rayUrl ?? "",
-		clashUrl: body.clashUrl ?? "",
+		url: targetUrl,
+		v2rayUrl: targetUrl,
+		clashUrl: "",
 		enabled: body.enabled ?? true,
 		priority: body.priority ?? 0,
 		notes: body.notes ?? "",
@@ -590,15 +592,21 @@ async function handlePublicSubscription(
 
 	const aggregate = await aggregateSourceRows({
 		sources: await Promise.all(
-			context.sources.map(async (source) => ({
-				...source,
-				v2rayUrl: source.v2ray_url_encrypted
+			context.sources.map(async (source) => {
+				const v2rayDecrypted = source.v2ray_url_encrypted
 					? await decryptText(source.v2ray_url_encrypted, env)
-					: "",
-				clashUrl: source.clash_url_encrypted
+					: "";
+				const clashDecrypted = source.clash_url_encrypted
 					? await decryptText(source.clash_url_encrypted, env)
-					: "",
-			})),
+					: "";
+				const sourceUrl = v2rayDecrypted || clashDecrypted;
+				return {
+					...source,
+					url: sourceUrl,
+					v2rayUrl: sourceUrl,
+					clashUrl: "",
+				};
+			}),
 		),
 		renameRules: context.renameRules,
 		settings: context.settings,
@@ -790,7 +798,7 @@ function sanitizeConfigPayload(input: SaveConfigPayload): SaveConfigPayload {
 function normalizeOptionalSourceUrl(
 	value: string | undefined,
 	name: string,
-	label: "V2Ray" | "Clash/Mihomo",
+	label: string = "订阅",
 ): string {
 	const raw = (value || "").trim();
 	if (!raw) {
@@ -817,17 +825,18 @@ function sanitizeSource(source: SourceConfig): SourceConfig {
 		throw new HttpError(400, "订阅源名称不能为空");
 	}
 
-	const v2rayUrl = normalizeOptionalSourceUrl(source.v2rayUrl, name, "V2Ray");
-	const clashUrl = normalizeOptionalSourceUrl(source.clashUrl, name, "Clash/Mihomo");
-	if (!v2rayUrl && !clashUrl) {
-		throw new HttpError(400, `订阅源 ${name} 至少填写一种订阅链接`);
+	const rawUrl = (source.url || source.v2rayUrl || source.clashUrl || "").trim();
+	const url = normalizeOptionalSourceUrl(rawUrl, name, "订阅");
+	if (!url) {
+		throw new HttpError(400, `订阅源 ${name} 必须填写订阅链接`);
 	}
 
 	return {
 		id: source.id?.trim() || crypto.randomUUID(),
 		name,
-		v2rayUrl,
-		clashUrl,
+		url,
+		v2rayUrl: url,
+		clashUrl: "",
 		enabled: Boolean(source.enabled),
 		priority: clampInteger(source.priority, 0, 999),
 		notes: (source.notes || "").trim().slice(0, 160),

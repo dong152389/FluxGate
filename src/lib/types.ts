@@ -143,8 +143,9 @@ export interface AdminUserListItem {
 export interface SourceConfig {
 	id: string;
 	name: string;
-	v2rayUrl: string;
-	clashUrl: string;
+	url: string;
+	v2rayUrl?: string;
+	clashUrl?: string;
 	enabled: boolean;
 	priority: number;
 	notes: string;

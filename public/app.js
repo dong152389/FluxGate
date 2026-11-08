@@ -152,8 +152,8 @@ document.addEventListener("click", async (event) => {
 		}
 
 		if (action === "copy-public-url") {
-			const value = state.config.publicUrls?.v2ray || state.config.publicUrl;
-			await copyText(value, "v2ray 订阅链接已复制");
+			const value = state.config.publicUrl || state.config.publicUrls?.unified || state.config.publicUrls?.v2ray || "";
+			await copyText(value, "订阅链接已复制");
 			return;
 		}
 
@@ -249,6 +249,7 @@ document.addEventListener("click", async (event) => {
 				state.config.publicUrl = result.publicUrl;
 				state.config.publicUrls = {
 					...(state.config.publicUrls || {}),
+					unified: result.publicUrl,
 					v2ray: result.publicUrl,
 					clash: `${result.publicUrl}?format=clash`,
 					raw: `${result.publicUrl}?raw=1`,
@@ -271,6 +272,7 @@ document.addEventListener("click", async (event) => {
 				state.config.publicUrl = result.publicUrl;
 				state.config.publicUrls = {
 					...(state.config.publicUrls || {}),
+					unified: result.publicUrl,
 					v2ray: result.publicUrl,
 					clash: `${result.publicUrl}?format=clash`,
 					raw: `${result.publicUrl}?raw=1`,
@@ -747,19 +749,14 @@ function renderOverview() {
 			<section class="card">
 				<div class="card-head">
 					<h3>公开订阅</h3>
-					<p>客户端填这个链接即可拉取聚合结果</p>
+					<p>客户端填这个链接即可拉取聚合结果（自动识别 Clash / Mihomo / V2Ray 等客户端）</p>
 				</div>
 				<div class="field">
-					<label for="public-url">v2ray 订阅链接</label>
-					<input id="public-url" value="${escapeAttribute(publicUrls.v2ray)}" readonly />
-				</div>
-				<div class="field">
-					<label for="public-url-clash">Clash / Mihomo 订阅链接</label>
-					<input id="public-url-clash" value="${escapeAttribute(publicUrls.clash)}" readonly />
+					<label for="public-url">订阅链接</label>
+					<input id="public-url" value="${escapeAttribute(publicUrls.unified || publicUrls.v2ray)}" readonly />
 				</div>
 				<div class="toolbar">
-					<button class="btn btn-primary btn-small" data-action="copy-public-url">复制 v2ray 链接</button>
-					<button class="btn btn-secondary btn-small" data-action="copy-clash-url">复制 Clash 链接</button>
+					<button class="btn btn-primary btn-small" data-action="copy-public-url">复制订阅链接</button>
 					<button class="btn btn-secondary btn-small" data-action="reset-token">重置 token</button>
 					<button class="btn btn-ghost btn-small" data-action="refresh-cache">刷新缓存</button>
 				</div>
@@ -1056,16 +1053,11 @@ function renderAccountView() {
 					<p>重置或刷新公开订阅缓存，旧链接会立即失效</p>
 				</div>
 				<div class="field">
-					<label for="account-public-url">当前 v2ray 订阅链接</label>
-					<input id="account-public-url" value="${escapeAttribute(publicUrls.v2ray)}" readonly />
-				</div>
-				<div class="field">
-					<label for="account-public-url-clash">当前 Clash / Mihomo 订阅链接</label>
-					<input id="account-public-url-clash" value="${escapeAttribute(publicUrls.clash)}" readonly />
+					<label for="account-public-url">当前订阅链接</label>
+					<input id="account-public-url" value="${escapeAttribute(publicUrls.unified || publicUrls.v2ray)}" readonly />
 				</div>
 				<div class="toolbar">
-					<button class="btn btn-secondary btn-small" data-action="copy-public-url">复制 v2ray 链接</button>
-					<button class="btn btn-secondary btn-small" data-action="copy-clash-url">复制 Clash 链接</button>
+					<button class="btn btn-secondary btn-small" data-action="copy-public-url">复制订阅链接</button>
 					<button class="btn btn-secondary btn-small" data-action="reset-token">重置 token</button>
 					<button class="btn btn-ghost btn-small" data-action="refresh-cache">刷新缓存</button>
 				</div>
@@ -1159,19 +1151,11 @@ function renderSourceCard(source, index) {
 					</div>
 				</div>
 				<div class="field">
-					<label>通用订阅链接 / 节点链接</label>
+					<label>订阅链接 / 节点链接</label>
 					<input
-						data-source-field="v2rayUrl"
-						value="${escapeAttribute(source.v2rayUrl || "")}"
-						placeholder="支持 Base64 / 明文多行 / Sing-box JSON / Clash YAML"
-					/>
-				</div>
-				<div class="field">
-					<label>备用 / Clash (Mihomo) 订阅链接（可选）</label>
-					<input
-						data-source-field="clashUrl"
-						value="${escapeAttribute(source.clashUrl || "")}"
-						placeholder="可选，支持 Clash / Mihomo YAML 订阅链接"
+						data-source-field="url"
+						value="${escapeAttribute(source.url || source.v2rayUrl || source.clashUrl || "")}"
+						placeholder="支持 Clash YAML / V2Ray Base64 / 明文多行 / Sing-box JSON 等"
 					/>
 				</div>
 				<div class="input-grid two">
@@ -1411,8 +1395,9 @@ function syncDraftConfig() {
 		state.config.sources = [...sourcesEditor.querySelectorAll("[data-source-id]")].map((card) => ({
 			id: card.dataset.sourceId,
 			name: card.querySelector('[data-source-field="name"]').value,
-			v2rayUrl: card.querySelector('[data-source-field="v2rayUrl"]').value,
-			clashUrl: card.querySelector('[data-source-field="clashUrl"]').value,
+			url: (card.querySelector('[data-source-field="url"]') || card.querySelector('[data-source-field="v2rayUrl"]') || card.querySelector('[data-source-field="clashUrl"]'))?.value || "",
+			v2rayUrl: (card.querySelector('[data-source-field="url"]') || card.querySelector('[data-source-field="v2rayUrl"]'))?.value || "",
+			clashUrl: "",
 			enabled: card.querySelector('[data-source-field="enabled"]').checked,
 			priority: Number(card.querySelector('[data-source-field="priority"]').value || 0),
 			notes: card.querySelector('[data-source-field="notes"]').value,
@@ -1667,6 +1652,7 @@ function blankSource() {
 	return {
 		id: crypto.randomUUID(),
 		name: "",
+		url: "",
 		v2rayUrl: "",
 		clashUrl: "",
 		enabled: true,
@@ -2174,6 +2160,7 @@ function resolvePublicUrls(config) {
 	const base = config?.publicUrl || "";
 	const urls = config?.publicUrls || {};
 	return {
+		unified: base || urls.unified || urls.v2ray || "",
 		v2ray: urls.v2ray || base,
 		clash: urls.clash || (base ? `${base}?format=clash` : ""),
 		raw: urls.raw || (base ? `${base}?raw=1` : ""),

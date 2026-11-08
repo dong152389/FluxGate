@@ -31,7 +31,10 @@ export async function testSingleSource(source: SourceConfig): Promise<{
 	nodeCount: number;
 	nodeNames: string[];
 }> {
-	const url = source.v2rayUrl || source.clashUrl;
+	const url = (source.url || source.v2rayUrl || source.clashUrl || "").trim();
+	if (!url) {
+		throw new Error("订阅链接不能为空");
+	}
 	const payload = await fetchSourcePayload(url);
 	const nodes = await parseSubscriptionPayload(payload, source);
 	return {
@@ -55,7 +58,7 @@ export async function aggregateSourceConfigs(input: {
 }
 
 export async function aggregateSourceRows(input: {
-	sources: Array<SourceRow & { v2rayUrl: string; clashUrl: string }>;
+	sources: Array<SourceRow & { url?: string; v2rayUrl?: string; clashUrl?: string }>;
 	renameRules: RenameRuleRow[];
 	settings: UserSettingsRow;
 	aliases: Map<string, string>;
@@ -64,16 +67,19 @@ export async function aggregateSourceRows(input: {
 		sources: input.sources
 			.filter((source) => Boolean(source.enabled))
 			.map(
-				(source) =>
-					({
+				(source) => {
+					const sourceUrl = source.url || source.v2rayUrl || source.clashUrl || "";
+					return {
 						id: source.id,
 						name: source.name,
-						v2rayUrl: source.v2rayUrl,
-						clashUrl: source.clashUrl,
+						url: sourceUrl,
+						v2rayUrl: sourceUrl,
+						clashUrl: "",
 						enabled: Boolean(source.enabled),
 						priority: source.priority,
 						notes: source.notes ?? "",
-					}) satisfies SourceConfig,
+					} satisfies SourceConfig;
+				},
 			)
 			.sort(compareSources),
 		renameRules: input.renameRules
@@ -115,7 +121,7 @@ async function aggregateInternal(input: {
 
 	for (const source of input.sources) {
 		try {
-			const payload = await fetchSourcePayload(source.v2rayUrl || source.clashUrl);
+			const payload = await fetchSourcePayload(source.url || source.v2rayUrl || source.clashUrl || "");
 			const nodes = await parseSubscriptionPayload(payload, source);
 			parsedNodes.push(...nodes);
 			sourceSummaries.push({
@@ -235,7 +241,7 @@ async function fetchSourcePayload(url: string): Promise<string> {
 }
 
 async function fetchAndParseSource(source: SourceConfig): Promise<ParsedNode[]> {
-	const urls = [source.v2rayUrl, source.clashUrl].filter((u): u is string => Boolean(u && u.trim()));
+	const urls = [source.url, source.v2rayUrl, source.clashUrl].filter((u): u is string => Boolean(u && u.trim()));
 	if (urls.length === 0) {
 		return [];
 	}
