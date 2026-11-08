@@ -3,16 +3,18 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
-    "start": "wrangler dev",
-    "typecheck": "tsc --noEmit",
-    "db:migrate:local": "wrangler d1 migrations apply fluxgate-db --local",
-    "cf-typegen": "wrangler types"
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
-    "typescript": "^5.5.2",
-    "wrangler": "^4.83.0"
+    "@types/nodemailer": "^8.0.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.5.2"
+  },
+  "dependencies": {
+    "mysql2": "^3.24.6",
+    "nodemailer": "^10.4.0"
   }
 }

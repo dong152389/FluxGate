@@ -99,10 +99,11 @@ export async function verifyPassword(
 export async function encryptText(value: string, env: AppEnv): Promise<string> {
 	const iv = crypto.getRandomValues(new Uint8Array(12));
 	const key = await getEncryptionKey(env);
+	const data = encodeUtf8(value);
 	const cipher = await crypto.subtle.encrypt(
 		{ name: "AES-GCM", iv },
 		key,
-		encodeUtf8(value),
+		data as unknown as BufferSource,
 	);
 	const payload = new Uint8Array(iv.length + cipher.byteLength);
 	payload.set(iv, 0);
@@ -115,7 +116,11 @@ export async function decryptText(value: string, env: AppEnv): Promise<string> {
 	const iv = payload.slice(0, 12);
 	const cipher = payload.slice(12);
 	const key = await getEncryptionKey(env);
-	const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, cipher);
+	const plain = await crypto.subtle.decrypt(
+		{ name: "AES-GCM", iv },
+		key,
+		cipher as unknown as BufferSource,
+	);
 	return decodeUtf8(new Uint8Array(plain));
 }
 
@@ -124,7 +129,7 @@ async function getEncryptionKey(env: AppEnv): Promise<CryptoKey> {
 	let keyPromise = keyCache.get(secret);
 	if (!keyPromise) {
 		keyPromise = crypto.subtle
-			.digest("SHA-256", encodeUtf8(secret))
+			.digest("SHA-256", encodeUtf8(secret) as unknown as BufferSource)
 			.then((digest) =>
 				crypto.subtle.importKey(
 					"raw",

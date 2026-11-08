@@ -1,2 +1,0 @@
-APP_SECRET=change-this-secret-before-deploy
-PUBLIC_BASE_URL=http://localhost:8787

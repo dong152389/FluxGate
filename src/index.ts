@@ -1,3 +1,7 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { resolve } from "node:path";
+import { Readable } from "node:stream";
+import { MemoryCacheStore } from "./lib/cache";
 import {
 	bumpCacheVersion,
 	createSession,
@@ -27,6 +31,13 @@ import {
 import { checkEmailWhitelist, generateVerificationCode, sendEmail } from "./lib/email";
 import { apiError, getCookie, json, makeCookie, readJson } from "./lib/http";
 import {
+	listClashTemplatePresets,
+	parseClashGroupOrder,
+	resolveClashGroupOrder,
+	resolveClashTemplateId,
+} from "./lib/mihomo-template-presets";
+import { createDatabasePool, initDatabase, MysqlDatabaseClient, parseMysqlEnv } from "./lib/mysql";
+import {
 	buildPublicUrl,
 	decryptText,
 	getCacheTtlSeconds,
@@ -36,43 +47,38 @@ import {
 	sha256Base64Url,
 	verifyPassword,
 } from "./lib/security";
+import { serveStaticFile } from "./lib/static";
 import {
 	aggregateSourceConfigs,
 	aggregateSourceRows,
 	buildClashSubscription,
 	testSingleSource,
 } from "./lib/subscription";
-import {
-	parseClashGroupOrder,
-	resolveClashGroupOrder,
-	resolveClashTemplateId,
-} from "./lib/mihomo-template-presets";
 import type {
 	AppEnv,
+	DatabaseClient,
 	SaveConfigPayload,
 	SourceConfig,
 	UserProfile,
 } from "./lib/types";
 
-export default {
-	async fetch(request, env, ctx): Promise<Response> {
-		try {
-			return await routeRequest(request, env, ctx);
-		} catch (error) {
-			if (error instanceof HttpError) {
-				return apiError(error.status, error.message);
-			}
-			const message = error instanceof Error ? error.message : "服务器内部错误";
-			const isApi = new URL(request.url).pathname.startsWith("/api/");
-			return isApi ? apiError(500, message) : new Response(message, { status: 500 });
+export async function handleRequest(request: Request, env: AppEnv, publicDir: string): Promise<Response> {
+	try {
+		return await routeRequest(request, env, publicDir);
+	} catch (error) {
+		if (error instanceof HttpError) {
+			return apiError(error.status, error.message);
 		}
-	},
-} satisfies ExportedHandler<AppEnv>;
+		const message = error instanceof Error ? error.message : "服务器内部错误";
+		const isApi = new URL(request.url).pathname.startsWith("/api/");
+		return isApi ? apiError(500, message) : new Response(message, { status: 500 });
+	}
+}
 
 async function routeRequest(
 	request: Request,
 	env: AppEnv,
-	ctx: ExecutionContext,
+	publicDir: string,
 ): Promise<Response> {
 	const url = new URL(request.url);
 
@@ -153,14 +159,24 @@ async function routeRequest(
 	}
 
 	if (request.method === "GET" && url.pathname.startsWith("/sub/")) {
-		return handlePublicSubscription(request, env, ctx);
+		return handlePublicSubscription(request, env);
 	}
 
 	if (url.pathname.startsWith("/api/")) {
 		return apiError(404, "接口不存在");
 	}
 
-	return env.ASSETS.fetch(request);
+	const staticResponse = await serveStaticFile(publicDir, url.pathname);
+	if (staticResponse) {
+		return staticResponse;
+	}
+
+	const spaFallback = await serveStaticFile(publicDir, "/index.html");
+	if (spaFallback) {
+		return spaFallback;
+	}
+
+	return new Response("Not Found", { status: 404 });
 }
 
 async function handleRegister(request: Request, env: AppEnv): Promise<Response> {
@@ -283,12 +299,10 @@ async function handleChangePassword(request: Request, env: AppEnv): Promise<Resp
 	}
 
 	const next = await hashPassword(newPassword);
-	await env.DB
-		.prepare(
-			"UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?",
-		)
-		.bind(next.hash, next.salt, new Date().toISOString(), auth.user.id)
-		.run();
+	await env.DB.execute(
+		"UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?",
+		[next.hash, next.salt, new Date().toISOString(), auth.user.id],
+	);
 
 	return json({ ok: true });
 }
@@ -389,7 +403,7 @@ async function handleSendCode(request: Request, env: AppEnv): Promise<Response> 
 }
 
 async function verifyCode(
-	db: D1Database,
+	db: DatabaseClient,
 	email: string,
 	purpose: string,
 	code: string,
@@ -540,7 +554,6 @@ async function handleRefresh(request: Request, env: AppEnv): Promise<Response> {
 async function handlePublicSubscription(
 	request: Request,
 	env: AppEnv,
-	ctx: ExecutionContext,
 ): Promise<Response> {
 	const url = new URL(request.url);
 	const token = url.pathname.slice("/sub/".length).trim();
@@ -604,7 +617,7 @@ async function handlePublicSubscription(
 			? aggregate.encodedText
 			: clash?.yamlText || "";
 	if (env.CACHE) {
-		ctx.waitUntil(env.CACHE.put(cacheKey, payload, { expirationTtl: getCacheTtlSeconds(env) }));
+		void env.CACHE.put(cacheKey, payload, { expirationTtl: getCacheTtlSeconds(env) });
 	}
 
 	return new Response(payload, {
@@ -963,7 +976,7 @@ function subscriptionHeaders(
 	format: PublicFormat,
 	username?: string,
 	clashTemplateId?: string | null,
-): HeadersInit {
+): Record<string, string> {
 	const profileTitle = buildProfileTitle(format, username, clashTemplateId);
 	if (format === "clash") {
 		return {
@@ -1013,3 +1026,122 @@ class HttpError extends Error {
 		this.status = status;
 	}
 }
+
+// Node.js HTTP Server Entrypoint
+async function nodeIncomingToWebRequest(req: IncomingMessage, defaultHost: string): Promise<Request> {
+	const host = req.headers.host || defaultHost;
+	const protocol = req.headers["x-forwarded-proto"] ? String(req.headers["x-forwarded-proto"]) : "http";
+	const url = new URL(req.url || "/", `${protocol}://${host}`);
+
+	const headers = new Headers();
+	for (const [key, value] of Object.entries(req.headers)) {
+		if (value === undefined) continue;
+		if (Array.isArray(value)) {
+			for (const v of value) {
+				headers.append(key, v);
+			}
+		} else {
+			headers.set(key, value);
+		}
+	}
+
+	const method = req.method || "GET";
+	const body = !["GET", "HEAD"].includes(method.toUpperCase())
+		? (Readable.toWeb(req) as ReadableStream<Uint8Array>)
+		: undefined;
+
+	return new Request(url.toString(), {
+		method,
+		headers,
+		body,
+		duplex: body ? "half" : undefined,
+	} as RequestInit & { duplex?: string });
+}
+
+async function sendWebResponseToNode(res: Response, nodeRes: ServerResponse): Promise<void> {
+	nodeRes.statusCode = res.status;
+	nodeRes.statusMessage = res.statusText;
+
+	res.headers.forEach((value, key) => {
+		nodeRes.setHeader(key, value);
+	});
+
+	if (res.body) {
+		const reader = res.body.getReader();
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				if (value) {
+					nodeRes.write(Buffer.from(value));
+				}
+			}
+		} finally {
+			nodeRes.end();
+		}
+	} else {
+		nodeRes.end();
+	}
+}
+
+export async function startServer(): Promise<void> {
+	// Try loading .env if present
+	try {
+		if (typeof process.loadEnvFile === "function") {
+			process.loadEnvFile();
+		}
+	} catch {
+		// Ignore if .env doesn't exist
+	}
+
+	const mysqlConfig = parseMysqlEnv();
+	const pool = createDatabasePool(mysqlConfig);
+	const db = new MysqlDatabaseClient(pool);
+
+	console.log(`[FluxGate] Connecting to MySQL at ${mysqlConfig.host}:${mysqlConfig.port}, database: ${mysqlConfig.database}...`);
+	await initDatabase(db);
+	console.log("[FluxGate] MySQL tables initialized successfully.");
+
+	const env: AppEnv = {
+		DB: db,
+		CACHE: new MemoryCacheStore(),
+		APP_SECRET: process.env.APP_SECRET || "change-this-secret-before-deploy",
+		APP_NAME: process.env.APP_NAME || "FluxGate",
+		PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
+		SESSION_TTL_DAYS: process.env.SESSION_TTL_DAYS || "30",
+		CACHE_TTL_SECONDS: process.env.CACHE_TTL_SECONDS || "600",
+		SMTP_HOST: process.env.SMTP_HOST,
+		SMTP_PORT: process.env.SMTP_PORT,
+		SMTP_USER: process.env.SMTP_USER,
+		SMTP_PASS: process.env.SMTP_PASS,
+		SMTP_FROM: process.env.SMTP_FROM,
+		EMAIL_WHITELIST: process.env.EMAIL_WHITELIST,
+	};
+
+	const publicDir = resolve(process.cwd(), "public");
+	const port = Number.parseInt(process.env.PORT || "80", 10);
+	const host = process.env.HOST || "0.0.0.0";
+
+	const server = createServer(async (req, res) => {
+		try {
+			const webRequest = await nodeIncomingToWebRequest(req, `localhost:${port}`);
+			const webResponse = await handleRequest(webRequest, env, publicDir);
+			await sendWebResponseToNode(webResponse, res);
+		} catch (error) {
+			console.error("[FluxGate] Unhandled server error:", error);
+			res.statusCode = 500;
+			res.setHeader("content-type", "application/json; charset=UTF-8");
+			res.end(JSON.stringify({ error: { status: 500, message: "服务器内部异常" } }));
+		}
+	});
+
+	server.listen(port, host, () => {
+		console.log(`[FluxGate] Server is running on http://${host}:${port}`);
+	});
+}
+
+// Start server if directly executed
+startServer().catch((err) => {
+	console.error("[FluxGate] Failed to start server:", err);
+	process.exit(1);
+});

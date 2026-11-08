@@ -1,7 +1,17 @@
+export interface DatabaseClient {
+	query<T = any>(sql: string, params?: any[]): Promise<T[]>;
+	queryRow<T = any>(sql: string, params?: any[]): Promise<T | null>;
+	execute(sql: string, params?: any[]): Promise<void>;
+}
+
+export interface CacheStore {
+	get(key: string): Promise<string | null>;
+	put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+}
+
 export interface AppEnv {
-	DB: D1Database;
-	CACHE?: KVNamespace;
-	ASSETS: Fetcher;
+	DB: DatabaseClient;
+	CACHE?: CacheStore;
 	APP_SECRET?: string;
 	APP_NAME?: string;
 	PUBLIC_BASE_URL?: string;

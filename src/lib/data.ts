@@ -6,6 +6,7 @@ import {
 	nowIso,
 	randomId,
 	randomToken,
+	sha256Base64Url,
 } from "./security";
 import {
 	listClashTemplatePresets,
@@ -17,6 +18,7 @@ import type {
 	AdminUserListItem,
 	AppEnv,
 	AggregationConfigResponse,
+	DatabaseClient,
 	NodeAliasRow,
 	PublicSubscriptionContext,
 	RenameRuleConfig,
@@ -32,47 +34,35 @@ import type {
 } from "./types";
 
 export async function findUserByUsername(
-	db: D1Database,
+	db: DatabaseClient,
 	username: string,
 ): Promise<UserRow | null> {
-	return (
-		(await db
-			.prepare("SELECT * FROM users WHERE username = ?")
-			.bind(username)
-			.first<UserRow>()) ?? null
-	);
+	return db.queryRow<UserRow>("SELECT * FROM users WHERE username = ?", [username]);
 }
 
 export async function findUserByEmail(
-	db: D1Database,
+	db: DatabaseClient,
 	email: string,
 ): Promise<UserRow | null> {
-	return (
-		(await db
-			.prepare("SELECT * FROM users WHERE email = ?")
-			.bind(email)
-			.first<UserRow>()) ?? null
-	);
+	return db.queryRow<UserRow>("SELECT * FROM users WHERE email = ?", [email]);
 }
 
 export async function updateUserEmail(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 	email: string | null,
 ): Promise<void> {
-	await db
-		.prepare("UPDATE users SET email = ?, updated_at = ? WHERE id = ?")
-		.bind(email, nowIso(), userId)
-		.run();
+	await db.execute(
+		"UPDATE users SET email = ?, updated_at = ? WHERE id = ?",
+		[email, nowIso(), userId],
+	);
 }
 
 export async function findUserById(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 ): Promise<UserRow | null> {
-	return (
-		(await db.prepare("SELECT * FROM users WHERE id = ?").bind(userId).first<UserRow>()) ?? null
-	);
+	return db.queryRow<UserRow>("SELECT * FROM users WHERE id = ?", [userId]);
 }
 
 export async function createUser(
@@ -88,12 +78,9 @@ export async function createUser(
 	const userId = randomId();
 	const timestamp = nowIso();
 
-	await db
-		.prepare(
-			`INSERT INTO users (id, username, email, password_hash, password_salt, status, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
-		)
-		.bind(
+	await db.execute(
+		"INSERT INTO users (id, username, email, password_hash, password_salt, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
+		[
 			userId,
 			input.username,
 			input.email,
@@ -101,17 +88,13 @@ export async function createUser(
 			input.passwordSalt,
 			timestamp,
 			timestamp,
-		)
-		.run();
+		],
+	);
 
-	await db
-		.prepare(
-			`INSERT INTO user_settings
-			 (user_id, public_token, dedupe_enabled, prefix_source_name, source_prefix_template, keep_unnamed, sort_mode, cache_version, created_at, updated_at)
-			 VALUES (?, ?, 1, 1, '[{{source}}] ', 1, 'source-priority', 1, ?, ?)`,
-		)
-		.bind(userId, randomToken(24), timestamp, timestamp)
-		.run();
+	await db.execute(
+		"INSERT INTO user_settings (user_id, public_token, dedupe_enabled, prefix_source_name, source_prefix_template, keep_unnamed, sort_mode, clash_template_id, clash_group_order, cache_version, created_at, updated_at) VALUES (?, ?, 1, 1, '[{{source}}] ', 1, 'source-priority', 'fixed-full', NULL, 1, ?, ?)",
+		[userId, randomToken(24), timestamp, timestamp],
+	);
 
 	return {
 		id: userId,
@@ -122,115 +105,99 @@ export async function createUser(
 }
 
 export async function createSession(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 	ttlSeconds: number,
 ): Promise<string> {
 	const token = randomToken(32);
-	const tokenHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-	const tokenHashValue = btoa(String.fromCharCode(...new Uint8Array(tokenHash)))
-		.replace(/\+/g, "-")
-		.replace(/\//g, "_")
-		.replace(/=+$/g, "");
-
+	const tokenHashValue = await sha256Base64Url(token);
 	const createdAt = nowIso();
 	const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
 
-	await db
-		.prepare(
-			`INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, last_seen_at)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-		)
-		.bind(randomId(), userId, tokenHashValue, expiresAt, createdAt, createdAt)
-		.run();
+	await db.execute(
+		"INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)",
+		[randomId(), userId, tokenHashValue, expiresAt, createdAt, createdAt],
+	);
 
 	return token;
 }
 
 export async function findSessionUser(
-	db: D1Database,
+	db: DatabaseClient,
 	tokenHash: string,
 ): Promise<SessionUserRow | null> {
-	return (
-		(await db
-			.prepare(
-				`SELECT
-				 sessions.id AS session_id,
-				 sessions.expires_at,
-				 sessions.last_seen_at,
-				 users.id AS user_id,
-				 users.username,
-				 users.email,
-				 users.email_verified,
-				 users.status
-				 FROM sessions
-				 JOIN users ON users.id = sessions.user_id
-				 WHERE sessions.token_hash = ?`,
-			)
-			.bind(tokenHash)
-			.first<SessionUserRow>()) ?? null
+	return db.queryRow<SessionUserRow>(
+		`SELECT
+		 sessions.id AS session_id,
+		 sessions.expires_at,
+		 sessions.last_seen_at,
+		 users.id AS user_id,
+		 users.username,
+		 users.email,
+		 users.email_verified,
+		 users.status
+		 FROM sessions
+		 JOIN users ON users.id = sessions.user_id
+		 WHERE sessions.token_hash = ?`,
+		[tokenHash],
 	);
 }
 
 export async function touchSession(
-	db: D1Database,
+	db: DatabaseClient,
 	sessionId: string,
 ): Promise<void> {
-	await db
-		.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?")
-		.bind(nowIso(), sessionId)
-		.run();
+	await db.execute(
+		"UPDATE sessions SET last_seen_at = ? WHERE id = ?",
+		[nowIso(), sessionId],
+	);
 }
 
 export async function deleteSessionByHash(
-	db: D1Database,
+	db: DatabaseClient,
 	tokenHash: string,
 ): Promise<void> {
-	await db.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(tokenHash).run();
+	await db.execute("DELETE FROM sessions WHERE token_hash = ?", [tokenHash]);
 }
 
 export async function listSources(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 ): Promise<SourceRow[]> {
-	const result = await db
-		.prepare("SELECT * FROM sources WHERE user_id = ? ORDER BY priority ASC, name ASC")
-		.bind(userId)
-		.all<SourceRow>();
-	return result.results ?? [];
+	return db.query<SourceRow>(
+		"SELECT * FROM sources WHERE user_id = ? ORDER BY priority ASC, name ASC",
+		[userId],
+	);
 }
 
 export async function listRenameRules(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 ): Promise<RenameRuleRow[]> {
-	const result = await db
-		.prepare("SELECT * FROM rename_rules WHERE user_id = ? ORDER BY rule_order ASC, id ASC")
-		.bind(userId)
-		.all<RenameRuleRow>();
-	return result.results ?? [];
+	return db.query<RenameRuleRow>(
+		"SELECT * FROM rename_rules WHERE user_id = ? ORDER BY rule_order ASC, id ASC",
+		[userId],
+	);
 }
 
 export async function listAliases(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 ): Promise<Map<string, string>> {
-	const result = await db
-		.prepare("SELECT * FROM node_aliases WHERE user_id = ?")
-		.bind(userId)
-		.all<NodeAliasRow>();
-	return new Map((result.results ?? []).map((entry) => [entry.fingerprint, entry.alias]));
+	const rows = await db.query<NodeAliasRow>(
+		"SELECT * FROM node_aliases WHERE user_id = ?",
+		[userId],
+	);
+	return new Map(rows.map((entry) => [entry.fingerprint, entry.alias]));
 }
 
 export async function getSettings(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 ): Promise<UserSettingsRow | null> {
-	return (
-		(await db
-			.prepare("SELECT * FROM user_settings WHERE user_id = ?")
-			.bind(userId)
-			.first<UserSettingsRow>()) ?? null
+	return db.queryRow<UserSettingsRow>(
+		"SELECT * FROM user_settings WHERE user_id = ?",
+		[userId],
 	);
 }
 
@@ -324,21 +291,19 @@ export async function saveConfig(
 	const timestamp = nowIso();
 	const clashTemplateId = resolveClashTemplateId(payload.settings.clashTemplateId);
 
-	await db
-		.prepare(
-			`UPDATE user_settings
-			 SET dedupe_enabled = ?,
-			     prefix_source_name = ?,
-			     source_prefix_template = ?,
-			     keep_unnamed = ?,
-			     sort_mode = ?,
-			     clash_template_id = ?,
-			     clash_group_order = ?,
-			     cache_version = cache_version + 1,
-			     updated_at = ?
-			 WHERE user_id = ?`,
-		)
-		.bind(
+	await db.execute(
+		`UPDATE user_settings
+		 SET dedupe_enabled = ?,
+		     prefix_source_name = ?,
+		     source_prefix_template = ?,
+		     keep_unnamed = ?,
+		     sort_mode = ?,
+		     clash_template_id = ?,
+		     clash_group_order = ?,
+		     cache_version = cache_version + 1,
+		     updated_at = ?
+		 WHERE user_id = ?`,
+		[
 			payload.settings.dedupeEnabled ? 1 : 0,
 			payload.settings.prefixSourceName ? 1 : 0,
 			payload.settings.sourcePrefixTemplate,
@@ -348,18 +313,16 @@ export async function saveConfig(
 			serializeClashGroupOrder(payload.settings.clashGroupOrder, clashTemplateId),
 			timestamp,
 			userId,
-		)
-		.run();
+		],
+	);
 
-	await db.prepare("DELETE FROM sources WHERE user_id = ?").bind(userId).run();
+	await db.execute("DELETE FROM sources WHERE user_id = ?", [userId]);
 	for (const source of payload.sources) {
-		await db
-			.prepare(
-				`INSERT INTO sources
-				 (id, user_id, name, v2ray_url_encrypted, clash_url_encrypted, enabled, priority, notes, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			)
-			.bind(
+		await db.execute(
+			`INSERT INTO sources
+			 (id, user_id, name, v2ray_url_encrypted, clash_url_encrypted, enabled, priority, notes, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[
 				source.id,
 				userId,
 				source.name,
@@ -370,19 +333,17 @@ export async function saveConfig(
 				source.notes,
 				timestamp,
 				timestamp,
-			)
-			.run();
+			],
+		);
 	}
 
-	await db.prepare("DELETE FROM rename_rules WHERE user_id = ?").bind(userId).run();
+	await db.execute("DELETE FROM rename_rules WHERE user_id = ?", [userId]);
 	for (const rule of payload.renameRules) {
-		await db
-			.prepare(
-				`INSERT INTO rename_rules
-				 (id, user_id, type, enabled, match_text, replace_text, value_text, rule_order, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			)
-			.bind(
+		await db.execute(
+			`INSERT INTO rename_rules
+			 (id, user_id, type, enabled, match_text, replace_text, value_text, rule_order, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[
 				rule.id,
 				userId,
 				rule.type,
@@ -393,39 +354,35 @@ export async function saveConfig(
 				rule.order,
 				timestamp,
 				timestamp,
-			)
-			.run();
+			],
+		);
 	}
 }
 
 export async function saveAlias(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 	fingerprint: string,
 	alias: string,
 ): Promise<void> {
 	if (!alias) {
-		await db
-			.prepare("DELETE FROM node_aliases WHERE user_id = ? AND fingerprint = ?")
-			.bind(userId, fingerprint)
-			.run();
+		await db.execute(
+			"DELETE FROM node_aliases WHERE user_id = ? AND fingerprint = ?",
+			[userId, fingerprint],
+		);
 		return;
 	}
 
-	await db
-		.prepare(
-			`INSERT INTO node_aliases (user_id, fingerprint, alias, updated_at)
-			 VALUES (?, ?, ?, ?)
-			 ON CONFLICT(user_id, fingerprint) DO UPDATE
-			 SET alias = excluded.alias,
-			     updated_at = excluded.updated_at`,
-		)
-		.bind(userId, fingerprint, alias, nowIso())
-		.run();
+	await db.execute(
+		`INSERT INTO node_aliases (user_id, fingerprint, alias, updated_at)
+		 VALUES (?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE alias = VALUES(alias), updated_at = VALUES(updated_at)`,
+		[userId, fingerprint, alias, nowIso()],
+	);
 }
 
 export async function saveAliasesBatch(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 	updates: Array<{ fingerprint: string; alias: string }>,
 ): Promise<void> {
@@ -434,62 +391,55 @@ export async function saveAliasesBatch(
 	}
 
 	const now = nowIso();
-	const statements = updates.map(({ fingerprint, alias }) =>
-		alias
-			? db
-					.prepare(
-						`INSERT INTO node_aliases (user_id, fingerprint, alias, updated_at)
-						 VALUES (?, ?, ?, ?)
-						 ON CONFLICT(user_id, fingerprint) DO UPDATE
-						 SET alias = excluded.alias,
-						     updated_at = excluded.updated_at`,
-					)
-					.bind(userId, fingerprint, alias, now)
-			: db
-					.prepare("DELETE FROM node_aliases WHERE user_id = ? AND fingerprint = ?")
-					.bind(userId, fingerprint),
-	);
-
-	await db.batch(statements);
+	for (const { fingerprint, alias } of updates) {
+		if (alias) {
+			await db.execute(
+				`INSERT INTO node_aliases (user_id, fingerprint, alias, updated_at)
+				 VALUES (?, ?, ?, ?)
+				 ON DUPLICATE KEY UPDATE alias = VALUES(alias), updated_at = VALUES(updated_at)`,
+				[userId, fingerprint, alias, now],
+			);
+		} else {
+			await db.execute(
+				"DELETE FROM node_aliases WHERE user_id = ? AND fingerprint = ?",
+				[userId, fingerprint],
+			);
+		}
+	}
 }
 
 export async function bumpCacheVersion(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 ): Promise<UserSettingsRow> {
-	await db
-		.prepare(
-			"UPDATE user_settings SET cache_version = cache_version + 1, updated_at = ? WHERE user_id = ?",
-		)
-		.bind(nowIso(), userId)
-		.run();
+	await db.execute(
+		"UPDATE user_settings SET cache_version = cache_version + 1, updated_at = ? WHERE user_id = ?",
+		[nowIso(), userId],
+	);
 	return getSettingsOrThrow(db, userId);
 }
 
 export async function rotatePublicToken(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 ): Promise<UserSettingsRow> {
-	await db
-		.prepare(
-			`UPDATE user_settings
-			 SET public_token = ?, cache_version = cache_version + 1, updated_at = ?
-			 WHERE user_id = ?`,
-		)
-		.bind(randomToken(24), nowIso(), userId)
-		.run();
+	await db.execute(
+		`UPDATE user_settings
+		 SET public_token = ?, cache_version = cache_version + 1, updated_at = ?
+		 WHERE user_id = ?`,
+		[randomToken(24), nowIso(), userId],
+	);
 	return getSettingsOrThrow(db, userId);
 }
 
 export async function getPublicSubscriptionContext(
-	db: D1Database,
+	db: DatabaseClient,
 	token: string,
 ): Promise<PublicSubscriptionContext | null> {
-	const settings =
-		(await db
-			.prepare("SELECT * FROM user_settings WHERE public_token = ?")
-			.bind(token)
-			.first<UserSettingsRow>()) ?? null;
+	const settings = await db.queryRow<UserSettingsRow>(
+		"SELECT * FROM user_settings WHERE public_token = ?",
+		[token],
+	);
 
 	if (!settings) {
 		return null;
@@ -515,7 +465,7 @@ export async function getPublicSubscriptionContext(
 }
 
 export async function getSettingsOrThrow(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 ): Promise<UserSettingsRow> {
 	const settings = await getSettings(db, userId);
@@ -525,79 +475,72 @@ export async function getSettingsOrThrow(
 	return settings;
 }
 
-export async function isAdmin(db: D1Database, userId: string): Promise<boolean> {
-	const firstUser = await db
-		.prepare("SELECT id FROM users ORDER BY created_at ASC LIMIT 1")
-		.first<{ id: string }>();
+export async function isAdmin(db: DatabaseClient, userId: string): Promise<boolean> {
+	const firstUser = await db.queryRow<{ id: string }>(
+		"SELECT id FROM users ORDER BY created_at ASC LIMIT 1",
+	);
 	return firstUser ? firstUser.id === userId : false;
 }
 
-export async function listAllUsers(db: D1Database): Promise<AdminUserListItem[]> {
-	const result = await db
-		.prepare("SELECT id, username, email, status, created_at, updated_at FROM users ORDER BY created_at ASC")
-		.all<AdminUserListItem>();
-	const rows = result.results ?? [];
+export async function listAllUsers(db: DatabaseClient): Promise<AdminUserListItem[]> {
+	const rows = await db.query<AdminUserListItem>(
+		"SELECT id, username, email, status, created_at, updated_at FROM users ORDER BY created_at ASC",
+	);
 	return rows.map((user, index) => ({ ...user, isAdmin: index === 0 }));
 }
 
 export async function updateUserStatus(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 	status: "active" | "disabled",
 ): Promise<void> {
-	await db
-		.prepare("UPDATE users SET status = ?, updated_at = ? WHERE id = ?")
-		.bind(status, nowIso(), userId)
-		.run();
+	await db.execute(
+		"UPDATE users SET status = ?, updated_at = ? WHERE id = ?",
+		[status, nowIso(), userId],
+	);
 }
 
-export async function deleteUserAndData(db: D1Database, userId: string): Promise<void> {
-	await db.prepare("DELETE FROM users WHERE id = ?").bind(userId).run();
+export async function deleteUserAndData(db: DatabaseClient, userId: string): Promise<void> {
+	await db.execute("DELETE FROM users WHERE id = ?", [userId]);
 }
 
 export async function createVerificationCode(
-	db: D1Database,
+	db: DatabaseClient,
 	input: { email: string; code: string; purpose: string; ttlMinutes: number },
 ): Promise<void> {
 	const createdAt = nowIso();
 	const expiresAt = new Date(Date.now() + input.ttlMinutes * 60_000).toISOString();
-	await db
-		.prepare(
-			`INSERT INTO verification_codes (id, email, code, purpose, used, expires_at, created_at)
-			 VALUES (?, ?, ?, ?, 0, ?, ?)`,
-		)
-		.bind(randomId(), input.email, input.code, input.purpose, expiresAt, createdAt)
-		.run();
-}
-
-export async function findLatestVerificationCode(
-	db: D1Database,
-	email: string,
-	purpose: string,
-): Promise<{ id: string; code: string; used: number; expires_at: string } | null> {
-	return (
-		(await db
-			.prepare(
-				`SELECT id, code, used, expires_at FROM verification_codes
-				 WHERE email = ? AND purpose = ?
-				 ORDER BY created_at DESC LIMIT 1`,
-			)
-			.bind(email, purpose)
-			.first<{ id: string; code: string; used: number; expires_at: string }>()) ?? null
+	await db.execute(
+		`INSERT INTO verification_codes (id, email, code, purpose, used, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, 0, ?, ?)`,
+		[randomId(), input.email, input.code, input.purpose, expiresAt, createdAt],
 	);
 }
 
-export async function markVerificationCodeUsed(db: D1Database, id: string): Promise<void> {
-	await db.prepare("UPDATE verification_codes SET used = 1 WHERE id = ?").bind(id).run();
+export async function findLatestVerificationCode(
+	db: DatabaseClient,
+	email: string,
+	purpose: string,
+): Promise<{ id: string; code: string; used: number; expires_at: string } | null> {
+	return db.queryRow<{ id: string; code: string; used: number; expires_at: string }>(
+		`SELECT id, code, used, expires_at FROM verification_codes
+		 WHERE email = ? AND purpose = ?
+		 ORDER BY created_at DESC LIMIT 1`,
+		[email, purpose],
+	);
+}
+
+export async function markVerificationCodeUsed(db: DatabaseClient, id: string): Promise<void> {
+	await db.execute("UPDATE verification_codes SET used = 1 WHERE id = ?", [id]);
 }
 
 export async function updateUserEmailVerified(
-	db: D1Database,
+	db: DatabaseClient,
 	userId: string,
 	verified: boolean,
 ): Promise<void> {
-	await db
-		.prepare("UPDATE users SET email_verified = ?, updated_at = ? WHERE id = ?")
-		.bind(verified ? 1 : 0, nowIso(), userId)
-		.run();
+	await db.execute(
+		"UPDATE users SET email_verified = ?, updated_at = ? WHERE id = ?",
+		[verified ? 1 : 0, nowIso(), userId],
+	);
 }

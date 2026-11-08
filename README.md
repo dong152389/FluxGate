@@ -10,15 +10,14 @@
 - `vmess` / `vless` 节点解析与重命名
 - 去重
 - 单节点别名
-- Cloudflare Worker 发布新订阅链接
+- Clash / Mihomo / V2Ray 格式订阅导出
 
 ## 技术栈
 
-- Cloudflare Worker
-- Cloudflare D1
-- Cloudflare KV
-- 原生静态前端
-- TypeScript
+- 运行环境: Node.js (v22+)
+- 数据库: MySQL 5.7+ / 8.0+
+- 开发语言: TypeScript
+- 前端: 原生静态前端（SPA 架构）
 
 ## 本地开发
 
@@ -28,104 +27,82 @@
 npm install
 ```
 
-2. 复制环境示例
+2. 准备环境变量
+
+复制环境变量模板文件：
 
 ```bash
-copy .dev.vars.example .dev.vars
+cp .env.example .env
 ```
 
-3. 创建 Cloudflare 资源
+并在 `.env` 中配置你的 MySQL 数据库连接信息及 `APP_SECRET`：
 
-```bash
-wrangler d1 create fluxgate-db
-wrangler kv namespace create CACHE
-wrangler kv namespace create CACHE --preview
+```env
+PORT=80
+APP_SECRET=your-random-strong-secret
+PUBLIC_BASE_URL=http://localhost:80
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=your_password
+MYSQL_DATABASE=fluxgate
 ```
 
-4. 把上一步返回的 `database_id`、`preview_database_id`、KV `id`、`preview_id` 写回 [wrangler.jsonc](/C:/Users/dong5/Desktop/sub/wrangler.jsonc)
-
-5. 初始化本地数据库
-
-```bash
-npm run db:migrate:local
-```
-
-6. 启动本地开发
+3. 启动开发服务
 
 ```bash
 npm run dev
 ```
 
-默认地址：
+服务启动时会自动连接 MySQL 并初始化所需数据表结构。
 
-- 管理台: `http://localhost:8787/`
-- 公开订阅: `http://localhost:8787/sub/{token}`
+默认访问地址：
+- 管理控制台: `http://localhost:80/`
+- 公开订阅地址: `http://localhost:80/sub/{token}`
 
-## 部署到 Cloudflare
-
-1. 准备 D1、KV 和自定义域名
-2. 把实际资源 ID 写入 [wrangler.jsonc](/C:/Users/dong5/Desktop/sub/wrangler.jsonc)
-3. 写入生产密钥
+4. 类型检查
 
 ```bash
-wrangler secret put APP_SECRET
-wrangler secret put PUBLIC_BASE_URL
-```
-
-4. 执行数据库迁移
-
-```bash
-wrangler d1 migrations apply fluxgate-db
-```
-
-5. 发布
-
-```bash
-npm run deploy
-```
-
-## 常用命令
-
-```bash
-npm run dev
 npm run typecheck
-npm run cf-typegen
 ```
+
+## Docker 容器化部署
+
+项目中已提供 `docker-compose.yml`，可配合已有 MySQL 容器或独立部署：
+
+```bash
+docker compose up -d
+```
+
+### 环境变量说明
+
+| 变量名 | 说明 | 默认值 |
+|---|---|---|
+| `PORT` | 监听端口 | `80` |
+| `APP_SECRET` | 数据加密密钥（请修改为随机高强度字符串） | - |
+| `PUBLIC_BASE_URL` | 公开访问基础域名或 IP | `http://localhost:80` |
+| `MYSQL_HOST` | MySQL 主机地址 | `localhost` |
+| `MYSQL_PORT` | MySQL 端口 | `3306` |
+| `MYSQL_USER` | MySQL 用户名 | `root` |
+| `MYSQL_PASSWORD` | MySQL 密码 | - |
+| `MYSQL_DATABASE` | MySQL 数据库名称 | `fluxgate` |
+| `MYSQL_URL` | MySQL 完整连接 URL（可选） | - |
+| `SESSION_TTL_DAYS` | 登录会话有效期（天） | `30` |
+| `CACHE_TTL_SECONDS` | 订阅缓存有效期（秒） | `600` |
+| `SMTP_HOST` | 邮件服务器地址（可选） | - |
+| `SMTP_PORT` | 邮件服务器端口（可选） | `465` |
+| `SMTP_USER` | 邮件服务器用户名（可选） | - |
+| `SMTP_PASS` | 邮件服务器密码（可选） | - |
+| `SMTP_FROM` | 发件人名称与地址（可选） | - |
+| `EMAIL_WHITELIST` | 允许注册的邮箱白名单（可选） | - |
 
 ## 目录结构
 
-- [public/index.html](/C:/Users/dong5/Desktop/sub/public/index.html): 管理台入口
-- [public/app.js](/C:/Users/dong5/Desktop/sub/public/app.js): 前端交互逻辑
-- [public/styles.css](/C:/Users/dong5/Desktop/sub/public/styles.css): 前端样式
-- [src/index.ts](/C:/Users/dong5/Desktop/sub/src/index.ts): Worker API 路由
-- [src/lib/subscription.ts](/C:/Users/dong5/Desktop/sub/src/lib/subscription.ts): 订阅解析、去重、重命名与序列化
-- [src/lib/security.ts](/C:/Users/dong5/Desktop/sub/src/lib/security.ts): 密码哈希、URL 加密、token 工具
-- [src/lib/data.ts](/C:/Users/dong5/Desktop/sub/src/lib/data.ts): D1 数据读写
-- [migrations/0001_init.sql](/C:/Users/dong5/Desktop/sub/migrations/0001_init.sql): 数据库结构
-
-## 当前支持
-
-- 明文多行订阅
-- Base64 订阅
-- `vless://`
-- `vmess://`
-- 公开订阅自动格式协商：
-  - 默认 `v2rayN`：`/sub/{token}` 返回 Base64 订阅
-  - `?raw=1`：返回明文 URI 列表
-  - `?format=clash`：返回 Clash/Mihomo YAML
-  - 若客户端 UA 含 `clash` / `mihomo` / `clash.meta` / `stash`，会自动返回 YAML
-
-### Mihomo 模板化
-
-- Clash/Mihomo 输出已改为模板驱动，模板文件在 [src/lib/mihomo-template.ts](/Users/dong5/Desktop/sub/src/lib/mihomo-template.ts)
-- 后续你只需要修改模板内容，不用改聚合逻辑
-- 保留两个占位符，不要删除：
-  - `__FLUXGATE_PROXIES__`：节点列表注入位置
-  - `__FLUXGATE_PROXY_GROUPS__`：策略组注入位置
-
-## 已知边界
-
-- 当前前端是原生单页应用，没有接入 React
-- 首版重点兼容 `vmess` / `vless`，其他协议会尽量保留原始内容
-- 这是“服务端代拉取”架构，不是零知识架构，服务端运行时仍然能访问明文上游 URL
-- `wrangler.jsonc` 里的资源 ID 现在是占位值，部署前必须替换
+- `public/`: 静态前端资源文件
+- `src/index.ts`: Node.js Web 服务入口与路由处理
+- `src/lib/mysql.ts`: MySQL 连接池与初始化
+- `src/lib/db-schema.ts`: MySQL 表结构定义
+- `src/lib/data.ts`: 数据读写层
+- `src/lib/subscription.ts`: 订阅解析、去重、重命名与生成
+- `src/lib/security.ts`: 密码哈希、数据加解密与 token 处理
+- `src/lib/email.ts`: 邮件与验证码发送
