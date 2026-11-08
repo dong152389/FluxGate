@@ -1,3 +1,4 @@
+import YAML from "yaml";
 import { tryDecodeBase64Text, utf8ToBase64 } from "./encoding";
 import {
 	MIHOMO_TEMPLATE_GROUPS_PLACEHOLDER,
@@ -218,7 +219,7 @@ async function fetchSourcePayload(url: string): Promise<string> {
 		const response = await fetch(url, {
 			method: "GET",
 			headers: {
-				accept: "text/plain, */*",
+				accept: "text/plain, application/json, text/yaml, application/x-yaml, */*",
 				"user-agent": "FluxGate/1.0",
 			},
 			signal: controller.signal,
@@ -233,15 +234,53 @@ async function fetchSourcePayload(url: string): Promise<string> {
 	}
 }
 
+async function fetchAndParseSource(source: SourceConfig): Promise<ParsedNode[]> {
+	const urls = [source.v2rayUrl, source.clashUrl].filter((u): u is string => Boolean(u && u.trim()));
+	if (urls.length === 0) {
+		return [];
+	}
+
+	let lastError: Error | null = null;
+	for (const url of urls) {
+		try {
+			const payload = await fetchSourcePayload(url);
+			const nodes = await parseSubscriptionPayload(payload, source);
+			if (nodes.length > 0) {
+				return nodes;
+			}
+		} catch (error) {
+			lastError = error instanceof Error ? error : new Error("拉取失败");
+		}
+	}
+
+	if (lastError && urls.length === 1) {
+		throw lastError;
+	}
+	return [];
+}
+
+const SUPPORTED_NODE_SCHEMES = new Set([
+	"vmess",
+	"vless",
+	"ss",
+	"ssr",
+	"trojan",
+	"hysteria",
+	"hysteria2",
+	"hy2",
+	"tuic",
+	"anytls",
+]);
+
 async function parseSubscriptionPayload(
 	payload: string,
 	source: SourceConfig,
 ): Promise<ParsedNode[]> {
-	const lines = normalizeSubscriptionContent(payload);
+	const nodeUris = extractNodeUrisFromPayload(payload);
 	const nodes: ParsedNode[] = [];
 
-	for (const line of lines) {
-		const parsed = await parseNodeLine(line, source);
+	for (const uri of nodeUris) {
+		const parsed = await parseNodeLine(uri, source);
 		if (parsed) {
 			nodes.push(parsed);
 		}
@@ -250,37 +289,343 @@ async function parseSubscriptionPayload(
 	return nodes;
 }
 
-function normalizeSubscriptionContent(payload: string): string[] {
-	const text = payload.trim();
+function extractNodeUrisFromPayload(payload: string): string[] {
+	const text = (payload || "").trim();
 	if (!text) {
 		return [];
 	}
 
-	if (text.includes("://")) {
-		return splitNodeLines(text);
+	// 1. Sing-box JSON 格式 (outbounds 列表)
+	if (text.startsWith("{") && text.endsWith("}")) {
+		try {
+			const obj = JSON.parse(text) as { outbounds?: Array<Record<string, unknown>> };
+			if (Array.isArray(obj.outbounds) && obj.outbounds.length > 0) {
+				const uris: string[] = [];
+				for (const outbound of obj.outbounds) {
+					const outboundType = String(outbound.type || "").toLowerCase();
+					if (["direct", "block", "dns", "selector", "urltest"].includes(outboundType)) {
+						continue;
+					}
+					const uri = singboxOutboundToUri(outbound);
+					if (uri) {
+						uris.push(uri);
+					}
+				}
+				if (uris.length > 0) {
+					return uris;
+				}
+			}
+		} catch {
+			// 解析 JSON 失败，回落到其他格式识别
+		}
 	}
 
+	// 2. Clash / Mihomo YAML 格式 (proxies 列表)
+	if (text.includes("proxies:") || (text.includes("port:") && text.includes("mode:"))) {
+		try {
+			const doc = YAML.parse(text) as { proxies?: Array<Record<string, unknown>> };
+			if (doc && Array.isArray(doc.proxies) && doc.proxies.length > 0) {
+				const uris: string[] = [];
+				for (const proxy of doc.proxies) {
+					const uri = clashProxyToUri(proxy);
+					if (uri) {
+						uris.push(uri);
+					}
+				}
+				if (uris.length > 0) {
+					return uris;
+				}
+			}
+		} catch {
+			// 解析 YAML 失败，回落到其他格式识别
+		}
+	}
+
+	// 3. 尝试 Base64 解密
 	const decoded = tryDecodeBase64Text(text);
-	if (decoded && decoded.includes("://")) {
-		return splitNodeLines(decoded);
-	}
+	const sourceText = decoded && decoded.includes("://") ? decoded : text;
 
-	return splitNodeLines(text);
-}
-
-function splitNodeLines(text: string): string[] {
-	return text
+	// 4. 明文多行节点链接解析（过滤非节点行和注释行，严格限制协议类型）
+	const rawLines = sourceText
 		.split(/\r?\n/)
 		.map((line) => line.trim())
-		.filter((line) => line && !line.startsWith("//"));
+		.filter((line) => line && !line.startsWith("//") && !line.startsWith("#"));
+
+	const uris: string[] = [];
+	for (const line of rawLines) {
+		const schemeIndex = line.indexOf("://");
+		if (schemeIndex <= 0) {
+			continue;
+		}
+		const scheme = line.slice(0, schemeIndex).toLowerCase();
+		if (SUPPORTED_NODE_SCHEMES.has(scheme)) {
+			uris.push(line);
+		}
+	}
+
+	return uris;
+}
+
+function clashProxyToUri(proxy: Record<string, unknown>): string | null {
+	if (!proxy || typeof proxy !== "object") {
+		return null;
+	}
+	const type = String(proxy.type || "").toLowerCase();
+	const name = String(proxy.name || "");
+	const server = String(proxy.server || "").trim();
+	const port = Number(proxy.port);
+	if (!server || !port || Number.isNaN(port)) {
+		return null;
+	}
+
+	if (type === "vmess") {
+		const wsOpts = (typeof proxy["ws-opts"] === "object" && proxy["ws-opts"] ? proxy["ws-opts"] : {}) as Record<string, unknown>;
+		const wsHeaders = (typeof wsOpts.headers === "object" && wsOpts.headers ? wsOpts.headers : {}) as Record<string, unknown>;
+		const host = String(wsHeaders.Host || wsHeaders.host || proxy.servername || "");
+		const path = String(wsOpts.path || "");
+		const payload = {
+			v: "2",
+			ps: name,
+			add: server,
+			port: String(port),
+			id: String(proxy.uuid || ""),
+			aid: String(proxy.alterId ?? 0),
+			scy: String(proxy.cipher || "auto"),
+			net: String(proxy.network || "tcp"),
+			type: "none",
+			host,
+			path,
+			tls: proxy.tls ? "tls" : "",
+			sni: String(proxy.servername || proxy.sni || host),
+			alpn: Array.isArray(proxy.alpn) ? proxy.alpn.join(",") : String(proxy.alpn || ""),
+		};
+		return `vmess://${utf8ToBase64(JSON.stringify(payload))}`;
+	}
+
+	if (type === "vless") {
+		const uuid = String(proxy.uuid || "");
+		const params = new URLSearchParams();
+		params.set("type", String(proxy.network || "tcp"));
+		if (proxy.tls) {
+			const realityOpts = (typeof proxy["reality-opts"] === "object" && proxy["reality-opts"] ? proxy["reality-opts"] : {}) as Record<string, unknown>;
+			if (realityOpts["public-key"] || realityOpts.publicKey) {
+				params.set("security", "reality");
+				if (realityOpts["public-key"] || realityOpts.publicKey) {
+					params.set("pbk", String(realityOpts["public-key"] || realityOpts.publicKey));
+				}
+				if (realityOpts["short-id"] || realityOpts.shortId) {
+					params.set("sid", String(realityOpts["short-id"] || realityOpts.shortId));
+				}
+			} else {
+				params.set("security", "tls");
+			}
+		} else {
+			params.set("security", "none");
+		}
+
+		if (proxy.flow) params.set("flow", String(proxy.flow));
+		if (proxy.servername || proxy.sni) params.set("sni", String(proxy.servername || proxy.sni));
+		if (proxy["client-fingerprint"]) params.set("fp", String(proxy["client-fingerprint"]));
+		if (proxy.alpn) params.set("alpn", Array.isArray(proxy.alpn) ? proxy.alpn.join(",") : String(proxy.alpn));
+		const wsOpts = (typeof proxy["ws-opts"] === "object" && proxy["ws-opts"] ? proxy["ws-opts"] : {}) as Record<string, unknown>;
+		const wsHeaders = (typeof wsOpts.headers === "object" && wsOpts.headers ? wsOpts.headers : {}) as Record<string, unknown>;
+		if (wsOpts.path) params.set("path", String(wsOpts.path));
+		const host = wsHeaders.Host || wsHeaders.host;
+		if (host) params.set("host", String(host));
+
+		return `vless://${encodeURIComponent(uuid)}@${server}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
+	}
+
+	if (type === "hysteria2" || type === "hy2") {
+		const password = String(proxy.password || "");
+		const params = new URLSearchParams();
+		if (proxy.sni) params.set("sni", String(proxy.sni));
+		if (proxy["skip-cert-verify"] || proxy.insecure) params.set("insecure", "1");
+		if (proxy.alpn) params.set("alpn", Array.isArray(proxy.alpn) ? proxy.alpn.join(",") : String(proxy.alpn));
+		if (proxy.obfs) params.set("obfs", String(proxy.obfs));
+		if (proxy["obfs-password"]) params.set("obfs-password", String(proxy["obfs-password"]));
+		if (proxy.ports) params.set("ports", String(proxy.ports));
+		return `hysteria2://${encodeURIComponent(password)}@${server}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
+	}
+
+	if (type === "tuic") {
+		const uuid = String(proxy.uuid || "");
+		const password = String(proxy.password || "");
+		const userinfo = password ? `${encodeURIComponent(uuid)}:${encodeURIComponent(password)}` : encodeURIComponent(uuid);
+		const params = new URLSearchParams();
+		if (proxy.sni) params.set("sni", String(proxy.sni));
+		if (proxy["skip-cert-verify"] || proxy.insecure) params.set("allowInsecure", "1");
+		if (proxy.alpn) params.set("alpn", Array.isArray(proxy.alpn) ? proxy.alpn.join(",") : String(proxy.alpn));
+		if (proxy["congestion-controller"]) params.set("congestion_control", String(proxy["congestion-controller"]));
+		if (proxy["udp-relay-mode"]) params.set("udp_relay_mode", String(proxy["udp-relay-mode"]));
+		return `tuic://${userinfo}@${server}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
+	}
+
+	if (type === "anytls") {
+		const password = String(proxy.password || "");
+		const params = new URLSearchParams();
+		if (proxy.sni) params.set("sni", String(proxy.sni));
+		if (proxy["skip-cert-verify"] || proxy.insecure) params.set("allowInsecure", "1");
+		if (proxy["client-fingerprint"]) params.set("client-fingerprint", String(proxy["client-fingerprint"]));
+		if (proxy.alpn) params.set("alpn", Array.isArray(proxy.alpn) ? proxy.alpn.join(",") : String(proxy.alpn));
+		return `anytls://${encodeURIComponent(password)}@${server}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
+	}
+
+	if (type === "ss") {
+		const cipher = String(proxy.cipher || "");
+		const password = String(proxy.password || "");
+		const userinfo = utf8ToBase64(`${cipher}:${password}`);
+		return `ss://${userinfo}@${server}:${port}#${encodeURIComponent(name)}`;
+	}
+
+	if (type === "trojan") {
+		const password = String(proxy.password || "");
+		const params = new URLSearchParams();
+		if (proxy.sni) params.set("sni", String(proxy.sni));
+		if (proxy["skip-cert-verify"] || proxy.insecure) params.set("allowInsecure", "1");
+		if (proxy.alpn) params.set("alpn", Array.isArray(proxy.alpn) ? proxy.alpn.join(",") : String(proxy.alpn));
+		return `trojan://${encodeURIComponent(password)}@${server}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
+	}
+
+	return null;
+}
+
+function singboxOutboundToUri(outbound: Record<string, unknown>): string | null {
+	if (!outbound || typeof outbound !== "object") {
+		return null;
+	}
+	const type = String(outbound.type || "").toLowerCase();
+	const tag = String(outbound.tag || "");
+	const server = String(outbound.server || "").trim();
+	const port = Number(outbound.server_port || outbound.port);
+	if (!server || !port || Number.isNaN(port)) {
+		return null;
+	}
+
+	const tls = (typeof outbound.tls === "object" && outbound.tls ? outbound.tls : {}) as Record<string, unknown>;
+	const transport = (typeof outbound.transport === "object" && outbound.transport ? outbound.transport : {}) as Record<string, unknown>;
+
+	if (type === "vmess") {
+		const wsHeaders = (typeof transport.headers === "object" && transport.headers ? transport.headers : {}) as Record<string, unknown>;
+		const hostArr = wsHeaders.Host || wsHeaders.host || [];
+		const host = Array.isArray(hostArr) ? String(hostArr[0]) : (hostArr ? String(hostArr) : String(tls.server_name || ""));
+		const path = String(transport.path || "");
+		const payload = {
+			v: "2",
+			ps: tag,
+			add: server,
+			port: String(port),
+			id: String(outbound.uuid || ""),
+			aid: String(outbound.alter_id ?? 0),
+			scy: String(outbound.security || "auto"),
+			net: String(transport.type || "tcp"),
+			type: "none",
+			host,
+			path,
+			tls: tls.enabled ? "tls" : "",
+			sni: String(tls.server_name || host),
+			alpn: Array.isArray(tls.alpn) ? tls.alpn.join(",") : String(tls.alpn || ""),
+		};
+		return `vmess://${utf8ToBase64(JSON.stringify(payload))}`;
+	}
+
+	if (type === "vless") {
+		const uuid = String(outbound.uuid || "");
+		const params = new URLSearchParams();
+		params.set("type", String(transport.type || "tcp"));
+		if (tls.enabled) {
+			const reality = (typeof tls.reality === "object" && tls.reality ? tls.reality : {}) as Record<string, unknown>;
+			if (reality.enabled || reality.public_key) {
+				params.set("security", "reality");
+				if (reality.public_key) params.set("pbk", String(reality.public_key));
+				if (reality.short_id) params.set("sid", String(reality.short_id));
+			} else {
+				params.set("security", "tls");
+			}
+		} else {
+			params.set("security", "none");
+		}
+
+		if (outbound.flow) params.set("flow", String(outbound.flow));
+		if (tls.server_name) params.set("sni", String(tls.server_name));
+		const utls = (typeof tls.utls === "object" && tls.utls ? tls.utls : {}) as Record<string, unknown>;
+		if (utls.fingerprint) params.set("fp", String(utls.fingerprint));
+		if (tls.alpn) params.set("alpn", Array.isArray(tls.alpn) ? tls.alpn.join(",") : String(tls.alpn));
+		if (transport.path) params.set("path", String(transport.path));
+		const wsHeaders = (typeof transport.headers === "object" && transport.headers ? transport.headers : {}) as Record<string, unknown>;
+		const hostArr = wsHeaders.Host || wsHeaders.host || [];
+		const host = Array.isArray(hostArr) ? hostArr[0] : hostArr;
+		if (host) params.set("host", String(host));
+
+		return `vless://${encodeURIComponent(uuid)}@${server}:${port}?${params.toString()}#${encodeURIComponent(tag)}`;
+	}
+
+	if (type === "hysteria2") {
+		const password = String(outbound.password || "");
+		const params = new URLSearchParams();
+		if (tls.server_name) params.set("sni", String(tls.server_name));
+		if (tls.insecure) params.set("insecure", "1");
+		if (tls.alpn) params.set("alpn", Array.isArray(tls.alpn) ? tls.alpn.join(",") : String(tls.alpn));
+		const obfs = (typeof outbound.obfs === "object" && outbound.obfs ? outbound.obfs : {}) as Record<string, unknown>;
+		if (obfs.password) {
+			params.set("obfs", String(obfs.type || "salamander"));
+			params.set("obfs-password", String(obfs.password));
+		}
+		return `hysteria2://${encodeURIComponent(password)}@${server}:${port}?${params.toString()}#${encodeURIComponent(tag)}`;
+	}
+
+	if (type === "tuic") {
+		const uuid = String(outbound.uuid || "");
+		const password = String(outbound.password || "");
+		const userinfo = password ? `${encodeURIComponent(uuid)}:${encodeURIComponent(password)}` : encodeURIComponent(uuid);
+		const params = new URLSearchParams();
+		if (tls.server_name) params.set("sni", String(tls.server_name));
+		if (tls.insecure) params.set("allowInsecure", "1");
+		if (tls.alpn) params.set("alpn", Array.isArray(tls.alpn) ? tls.alpn.join(",") : String(tls.alpn));
+		if (outbound.congestion_control) params.set("congestion_control", String(outbound.congestion_control));
+		if (outbound.udp_relay_mode) params.set("udp_relay_mode", String(outbound.udp_relay_mode));
+		return `tuic://${userinfo}@${server}:${port}?${params.toString()}#${encodeURIComponent(tag)}`;
+	}
+
+	if (type === "anytls") {
+		const password = String(outbound.password || "");
+		const params = new URLSearchParams();
+		if (tls.server_name) params.set("sni", String(tls.server_name));
+		if (tls.insecure) params.set("allowInsecure", "1");
+		if (tls.alpn) params.set("alpn", Array.isArray(tls.alpn) ? tls.alpn.join(",") : String(tls.alpn));
+		return `anytls://${encodeURIComponent(password)}@${server}:${port}?${params.toString()}#${encodeURIComponent(tag)}`;
+	}
+
+	if (type === "shadowsocks") {
+		const method = String(outbound.method || "");
+		const password = String(outbound.password || "");
+		const userinfo = utf8ToBase64(`${method}:${password}`);
+		return `ss://${userinfo}@${server}:${port}#${encodeURIComponent(tag)}`;
+	}
+
+	if (type === "trojan") {
+		const password = String(outbound.password || "");
+		const params = new URLSearchParams();
+		if (tls.server_name) params.set("sni", String(tls.server_name));
+		if (tls.insecure) params.set("allowInsecure", "1");
+		if (tls.alpn) params.set("alpn", Array.isArray(tls.alpn) ? tls.alpn.join(",") : String(tls.alpn));
+		return `trojan://${encodeURIComponent(password)}@${server}:${port}?${params.toString()}#${encodeURIComponent(tag)}`;
+	}
+
+	return null;
 }
 
 async function parseNodeLine(
 	line: string,
 	source: SourceConfig,
 ): Promise<ParsedNode | null> {
-	const protocol = line.slice(0, line.indexOf("://")).toLowerCase();
-	if (!protocol) {
+	const schemeIndex = line.indexOf("://");
+	if (schemeIndex <= 0) {
+		return null;
+	}
+
+	const protocol = line.slice(0, schemeIndex).toLowerCase();
+	if (!protocol || !SUPPORTED_NODE_SCHEMES.has(protocol)) {
 		return null;
 	}
 
@@ -364,13 +709,18 @@ async function parseGenericNode(
 	try {
 		const urlValue = new URL(line);
 		const fallbackName = `${source.name} ${urlValue.hostname || "节点"}`.trim();
+		const scheme = urlValue.protocol.replace(":", "").toLowerCase();
+		const originalName = decodeHashName(urlValue.hash);
+		const port = urlValue.port || (["hysteria2", "hy2", "tuic", "anytls", "trojan"].includes(scheme) ? "443" : "80");
+		const userOrPass = urlValue.username || urlValue.password || "default";
+
 		return {
 			kind: "generic",
-			protocol: urlValue.protocol.replace(":", ""),
+			protocol: scheme,
 			rawUri: line,
-			originalName: decodeHashName(urlValue.hash),
+			originalName,
 			fallbackName,
-			fingerprint: await sha256Base64Url(line.trim()),
+			fingerprint: await sha256Base64Url(`${scheme}|${urlValue.hostname}|${port}|${userOrPass}`),
 			sourceId: source.id,
 			sourceName: source.name,
 			sourcePriority: source.priority,
@@ -426,6 +776,12 @@ function serializeNode(node: ParsedNode, name: string): string {
 		const rewritten = new URL(node.urlValue.toString());
 		rewritten.hash = name ? `#${encodeURIComponent(name)}` : "";
 		return rewritten.toString();
+	}
+
+	if (node.rawUri) {
+		const hashIndex = node.rawUri.indexOf("#");
+		const base = hashIndex >= 0 ? node.rawUri.slice(0, hashIndex) : node.rawUri;
+		return name ? `${base}#${encodeURIComponent(name)}` : base;
 	}
 
 	return node.rawUri;

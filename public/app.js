@@ -1159,19 +1159,19 @@ function renderSourceCard(source, index) {
 					</div>
 				</div>
 				<div class="field">
-					<label>V2Ray 订阅链接</label>
+					<label>通用订阅链接 / 节点链接</label>
 					<input
 						data-source-field="v2rayUrl"
 						value="${escapeAttribute(source.v2rayUrl || "")}"
-						placeholder="https://example.com/v2ray-sub"
+						placeholder="支持 Base64 / 明文多行 / Sing-box JSON / Clash YAML"
 					/>
 				</div>
 				<div class="field">
-					<label>Clash / Mihomo 链接</label>
+					<label>备用 / Clash (Mihomo) 订阅链接（可选）</label>
 					<input
 						data-source-field="clashUrl"
 						value="${escapeAttribute(source.clashUrl || "")}"
-						placeholder="https://example.com/clash-sub"
+						placeholder="可选，支持 Clash / Mihomo YAML 订阅链接"
 					/>
 				</div>
 				<div class="input-grid two">
