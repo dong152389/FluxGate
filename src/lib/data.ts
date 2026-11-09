@@ -329,11 +329,12 @@ export async function saveConfig(
 		const targetUrl = (source.url || source.v2rayUrl || source.clashUrl || "").trim();
 		await db.execute(
 			`INSERT INTO sources
-			 (id, user_id, name, v2ray_url_encrypted, clash_url_encrypted, enabled, priority, notes, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 (id, user_id, type, name, v2ray_url_encrypted, clash_url_encrypted, enabled, priority, notes, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			[
 				source.id,
 				userId,
+				source.type === "yaml" || source.type === "nodes" ? source.type : "url",
 				source.name,
 				targetUrl ? await encryptText(targetUrl, env) : null,
 				null,

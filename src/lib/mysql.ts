@@ -69,4 +69,13 @@ export async function initDatabase(db: DatabaseClient): Promise<void> {
 	for (const statement of CREATE_TABLES_SQL) {
 		await db.execute(statement);
 	}
+	try {
+		await db.execute("ALTER TABLE sources ADD COLUMN type VARCHAR(32) NOT NULL DEFAULT 'url' AFTER user_id");
+	} catch {}
+	try {
+		await db.execute("ALTER TABLE sources MODIFY COLUMN v2ray_url_encrypted MEDIUMTEXT NULL");
+	} catch {}
+	try {
+		await db.execute("ALTER TABLE sources MODIFY COLUMN clash_url_encrypted MEDIUMTEXT NULL");
+	} catch {}
 }

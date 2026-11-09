@@ -1275,3 +1275,48 @@ input[type="checkbox"] {
 		grid-template-columns: 1fr;
 	}
 }
+
+
+/* ===== Source Type Switcher & Code Textarea ===== */
+.source-type-pill {
+	display: inline-flex;
+	padding: 3px;
+	border-radius: 9px;
+	background: rgba(95, 64, 35, 0.08);
+	gap: 3px;
+}
+
+.source-type-btn {
+	border: none;
+	background: transparent;
+	padding: 4px 10px;
+	border-radius: 7px;
+	font-size: 0.82rem;
+	font-weight: 500;
+	color: var(--muted);
+	cursor: pointer;
+	transition: all 120ms ease;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.source-type-btn:hover {
+	color: var(--text);
+}
+
+.source-type-btn.active {
+	background: #fff;
+	color: var(--accent-strong);
+	font-weight: 600;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.code-textarea {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+	font-size: 0.84rem;
+	line-height: 1.45;
+	tab-size: 2;
+	white-space: pre;
+	word-break: normal;
+}

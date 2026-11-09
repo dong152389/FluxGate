@@ -35,8 +35,9 @@ export const CREATE_TABLES_SQL: string[] = [
 	`CREATE TABLE IF NOT EXISTS sources (
 		id VARCHAR(64) NOT NULL,
 		user_id VARCHAR(64) NOT NULL,
+		type VARCHAR(32) NOT NULL DEFAULT 'url',
 		name VARCHAR(120) NOT NULL,
-		v2ray_url_encrypted TEXT NULL,
+		v2ray_url_encrypted MEDIUMTEXT NULL,
 		clash_url_encrypted TEXT NULL,
 		enabled TINYINT NOT NULL DEFAULT 1,
 		priority INT NOT NULL DEFAULT 0,

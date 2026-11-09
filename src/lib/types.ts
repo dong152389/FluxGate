@@ -32,6 +32,7 @@ export interface AppEnv {
 export type UserStatus = "active" | "disabled";
 export type RenameRuleKind = "prefix" | "suffix" | "replace" | "regex";
 export type SortMode = "source-priority" | "name";
+export type SourceType = "url" | "yaml" | "nodes";
 
 export interface UserRow {
 	id: string;
@@ -63,6 +64,7 @@ export interface UserSettingsRow {
 export interface SourceRow {
 	id: string;
 	user_id: string;
+	type?: SourceType;
 	name: string;
 	v2ray_url_encrypted: string | null;
 	clash_url_encrypted: string | null;
@@ -143,6 +145,7 @@ export interface AdminUserListItem {
 
 export interface SourceConfig {
 	id: string;
+	type?: SourceType;
 	name: string;
 	url: string;
 	v2rayUrl?: string;

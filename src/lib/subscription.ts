@@ -27,15 +27,30 @@ import type {
 	UserSettingsRow,
 } from "./types";
 
+
+const SUBSCRIPTION_INFO_NODE_NAME_RE =
+	/^(剩余流量|剩余订阅流量|距离下次重置剩余|套餐到期|订阅到期|到期时间|过期时间|流量信息|账号信息|用户信息)\s*[:：]/i;
+const PIPE_STYLE_ACCOUNT_INFO_NODE_NAME_RE = /^(余额|会员|等级|重置日)\s*\|/i;
+const SUBSCRIPTION_UPDATE_HINT_NODE_NAME_RE = /(版本太旧|请更新|更新软件|去官网更新|公告|通知|官网|客服)/i;
+
+export function isSubscriptionInfoNodeName(name: string): boolean {
+	const trimmed = (name || "").trim();
+	return (
+		SUBSCRIPTION_INFO_NODE_NAME_RE.test(trimmed) ||
+		PIPE_STYLE_ACCOUNT_INFO_NODE_NAME_RE.test(trimmed) ||
+		SUBSCRIPTION_UPDATE_HINT_NODE_NAME_RE.test(trimmed)
+	);
+}
+
 export async function testSingleSource(source: SourceConfig): Promise<{
 	nodeCount: number;
 	nodeNames: string[];
 }> {
-	const url = (source.url || source.v2rayUrl || source.clashUrl || "").trim();
-	if (!url) {
-		throw new Error("订阅链接不能为空");
+	const content = (source.url || source.v2rayUrl || source.clashUrl || "").trim();
+	if (!content) {
+		throw new Error("订阅源内容不能为空");
 	}
-	const payload = await fetchSourcePayload(url);
+	const payload = await resolveSourcePayload(source);
 	const nodes = await parseSubscriptionPayload(payload, source);
 	return {
 		nodeCount: nodes.length,
@@ -121,7 +136,7 @@ async function aggregateInternal(input: {
 
 	for (const source of input.sources) {
 		try {
-			const payload = await fetchSourcePayload(source.url || source.v2rayUrl || source.clashUrl || "");
+			const payload = await resolveSourcePayload(source);
 			const nodes = await parseSubscriptionPayload(payload, source);
 			parsedNodes.push(...nodes);
 			sourceSummaries.push({
@@ -169,14 +184,16 @@ async function aggregateInternal(input: {
 			continue;
 		}
 
-		if (input.settings.dedupeEnabled) {
-			if (seen.has(parsed.fingerprint)) {
-				continue;
+		const isInfo = isSubscriptionInfoNodeName(originalName) || isSubscriptionInfoNodeName(finalName);
+			if (input.settings.dedupeEnabled) {
+				const dedupeKey = isInfo ? ("info|" + parsed.sourceId + "|" + parsed.fingerprint + "|" + originalName) : parsed.fingerprint;
+				if (seen.has(dedupeKey)) {
+					continue;
+				}
+				seen.add(dedupeKey);
 			}
-			seen.add(parsed.fingerprint);
-		}
 
-		nodes.push({
+			nodes.push({
 			fingerprint: parsed.fingerprint,
 			protocol: parsed.protocol,
 			sourceId: parsed.sourceId,
@@ -215,6 +232,20 @@ function compareSources(left: SourceConfig, right: SourceConfig): number {
 
 function compareRules(left: RenameRuleConfig, right: RenameRuleConfig): number {
 	return left.order - right.order || left.id.localeCompare(right.id);
+}
+
+
+async function resolveSourcePayload(source: SourceConfig): Promise<string> {
+	const content = (source.url || source.v2rayUrl || source.clashUrl || "").trim();
+	if (!content) {
+		return "";
+	}
+	const sourceType = source.type || "url";
+	if (sourceType === "yaml" || sourceType === "nodes") {
+		return content;
+	}
+	// default: "url"
+	return await fetchSourcePayload(content);
 }
 
 async function fetchSourcePayload(url: string): Promise<string> {
@@ -282,7 +313,7 @@ async function parseSubscriptionPayload(
 	payload: string,
 	source: SourceConfig,
 ): Promise<ParsedNode[]> {
-	const nodeUris = extractNodeUrisFromPayload(payload);
+		const nodeUris = extractNodeUrisFromPayload(payload);
 	const nodes: ParsedNode[] = [];
 
 	for (const uri of nodeUris) {
@@ -295,8 +326,29 @@ async function parseSubscriptionPayload(
 	return nodes;
 }
 
+
+function repairYamlText(raw: string): string {
+	const text = raw.replace(/\t/g, "  ");
+	const lines = text.split(/\r?\n/);
+	const hasSeq = lines.some((l) => l.trim().startsWith("- ") || l.trim().startsWith("-{"));
+	if (!hasSeq) {
+		return text;
+	}
+
+	// 查找所有非空行，判断是否大部分列表项带有不一致的前导缩进（例如第1行trim后缩进为0，第2行起为4空格）
+	const normalized = lines.map((line) => {
+		const trimmed = line.trim();
+		if (trimmed.startsWith("- ") || trimmed.startsWith("-{")) {
+			return trimmed;
+		}
+		return line;
+	}).join("\n");
+
+	return normalized;
+}
+
 function extractNodeUrisFromPayload(payload: string): string[] {
-	const text = (payload || "").trim();
+		const text = (payload || "").trim();
 	if (!text) {
 		return [];
 	}
@@ -326,13 +378,36 @@ function extractNodeUrisFromPayload(payload: string): string[] {
 		}
 	}
 
-	// 2. Clash / Mihomo YAML 格式 (proxies 列表)
-	if (text.includes("proxies:") || (text.includes("port:") && text.includes("mode:"))) {
+	// 2. Clash / Mihomo YAML 格式 (proxies 列表、列表数组或纯节点列表)
 		try {
-			const doc = YAML.parse(text) as { proxies?: Array<Record<string, unknown>> };
-			if (doc && Array.isArray(doc.proxies) && doc.proxies.length > 0) {
+			const candidateTexts = [text, repairYamlText(text)];
+			let doc: any = null;
+
+			for (const cand of candidateTexts) {
+				try {
+					doc = YAML.parse(cand);
+					if (doc && (Array.isArray(doc) || Array.isArray(doc?.proxies))) {
+						break;
+					}
+				} catch {}
+
+				try {
+					doc = YAML.parse("proxies:\n" + cand);
+					if (doc && (Array.isArray(doc) || Array.isArray(doc?.proxies))) {
+						break;
+					}
+				} catch {}
+			}
+
+			const proxyList: Array<Record<string, unknown>> = Array.isArray(doc)
+				? doc
+				: Array.isArray(doc?.proxies)
+					? doc.proxies
+					: [];
+
+			if (proxyList.length > 0) {
 				const uris: string[] = [];
-				for (const proxy of doc.proxies) {
+				for (const proxy of proxyList) {
 					const uri = clashProxyToUri(proxy);
 					if (uri) {
 						uris.push(uri);
@@ -345,7 +420,6 @@ function extractNodeUrisFromPayload(payload: string): string[] {
 		} catch {
 			// 解析 YAML 失败，回落到其他格式识别
 		}
-	}
 
 	// 3. 尝试 Base64 解密
 	const decoded = tryDecodeBase64Text(text);
@@ -933,7 +1007,10 @@ function renderPolicyProxyGroup(
 }
 
 function renderAutoProxyGroup(proxyNames: string[]): string[] {
-	const deduped = Array.from(new Set(proxyNames.filter((value) => value.trim().length > 0)));
+	// 过滤掉提示信息类节点（如剩余流量、套餐到期等），避免在 url-test 中产生测速错误或超时
+	const usableProxies = proxyNames.filter((value) => value.trim().length > 0 && !isSubscriptionInfoNodeName(value));
+	const candidates = usableProxies.length > 0 ? usableProxies : proxyNames.filter((value) => value.trim().length > 0);
+	const deduped = Array.from(new Set(candidates));
 	return [
 		`  - name: '${escapeYamlSingleQuoted(CLASH_AUTO_GROUP_NAME)}'`,
 		"    type: url-test",

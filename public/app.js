@@ -120,6 +120,17 @@ document.addEventListener("click", async (event) => {
 			return;
 		}
 
+		if (action === "change-source-type") {
+			const sourceId = button.dataset.id;
+			const targetType = button.dataset.type;
+			const source = state.config.sources.find((item) => item.id === sourceId);
+			if (source) {
+				source.type = targetType;
+				render();
+			}
+			return;
+		}
+
 		if (action === "add-source") {
 			state.config.sources.push(blankSource());
 			render();
@@ -1122,57 +1133,75 @@ function renderAdminView() {
 }
 
 function renderSourceCard(source, index) {
-	const check = state.sourceChecks[source.id];
-	return `
-		<div class="item-card" data-source-id="${escapeAttribute(source.id)}">
-			<div class="item-card-header">
-				<div class="item-card-title">
-					<span class="item-index">${index + 1}</span>
-					<div>
-						<strong>${escapeHtml(source.name || `来源 ${index + 1}`)}</strong>
-						<div class="muted">${check ? escapeHtml(check.error ? check.error : `最近测试成功，节点 ${check.nodeCount}`) : "可单独测试这个源的可达性和节点数量"}</div>
-					</div>
-				</div>
-				<div class="inline-actions">
-					${check ? `<span class="badge ${check.error ? "fail" : "ok"}">${check.error ? "测试失败" : `节点 ${check.nodeCount}`}</span>` : ""}
-					<button class="btn btn-secondary btn-small" data-action="test-source" data-id="${escapeAttribute(source.id)}">测试</button>
-					<button class="btn btn-danger btn-small" data-action="remove-source" data-id="${escapeAttribute(source.id)}">删除</button>
-				</div>
-			</div>
-			<div class="input-grid">
-				<div class="input-grid two">
-					<div class="field">
-						<label>来源名称</label>
-						<input data-source-field="name" value="${escapeAttribute(source.name)}" placeholder="机场 A" />
-					</div>
-					<div class="field">
-						<label>优先级</label>
-						<input data-source-field="priority" type="number" min="0" max="999" value="${Number(source.priority) || 0}" />
-					</div>
-				</div>
-				<div class="field">
-					<label>订阅链接 / 节点链接</label>
-					<input
-						data-source-field="url"
-						value="${escapeAttribute(source.url || source.v2rayUrl || source.clashUrl || "")}"
-						placeholder="支持 Clash YAML / V2Ray Base64 / 明文多行 / Sing-box JSON 等"
-					/>
-				</div>
-				<div class="input-grid two">
-					<div class="field">
-						<label class="toggle-row"><input data-source-field="enabled" type="checkbox" ${source.enabled ? "checked" : ""} />启用这个来源</label>
-					</div>
-					<div class="field">
-						<label>备注</label>
-						<input data-source-field="notes" value="${escapeAttribute(source.notes || "")}" placeholder="可记录机场套餐或用途" />
-					</div>
-				</div>
-			</div>
-		</div>
-	`;
-}
+		const check = state.sourceChecks[source.id];
+		const type = source.type || "url";
+		const contentValue = source.url || source.v2rayUrl || source.clashUrl || "";
 
-function renderRuleCard(rule, index) {
+		let placeholder = "https://example.com/sub?token=xxx";
+		let labelText = "订阅链接 (URL)";
+		let inputControl = `<input data-source-field="url" value="${escapeAttribute(contentValue)}" placeholder="${placeholder}" />`;
+
+		if (type === "yaml") {
+			placeholder = "proxies:\n  - name: 节点名称\n    type: vmess\n    server: server.com\n    port: 443\n...";
+			labelText = "YAML 配置 (完整的 proxies 列表或纯节点列表)";
+			inputControl = `<textarea class="code-textarea" rows="6" data-source-field="url" placeholder="${placeholder}">${escapeHtml(contentValue)}</textarea>`;
+		} else if (type === "nodes") {
+			placeholder = "vmess://...\nvless://...\nss://...\nhysteria2://...\ntrojan://...";
+			labelText = "节点链接 (多行节点 URL)";
+			inputControl = `<textarea class="code-textarea" rows="6" data-source-field="url" placeholder="${placeholder}">${escapeHtml(contentValue)}</textarea>`;
+		}
+
+		return `
+			<div class="item-card" data-source-id="${escapeAttribute(source.id)}" data-source-type="${escapeAttribute(type)}">
+				<div class="item-card-header">
+					<div class="item-card-title">
+						<span class="item-index">${index + 1}</span>
+						<div>
+							<strong>${escapeHtml(source.name || `来源 ${index + 1}`)}</strong>
+							<div class="muted">${check ? escapeHtml(check.error ? check.error : `最近测试成功，节点 ${check.nodeCount}`) : "支持订阅链接、YAML配置或单个/多个节点链接"}</div>
+						</div>
+					</div>
+					<div class="inline-actions" style="align-items: center;">
+						<div class="source-type-pill">
+							<button type="button" class="source-type-btn ${type === "url" ? "active" : ""}" data-action="change-source-type" data-id="${escapeAttribute(source.id)}" data-type="url">🔗 订阅链接</button>
+							<button type="button" class="source-type-btn ${type === "yaml" ? "active" : ""}" data-action="change-source-type" data-id="${escapeAttribute(source.id)}" data-type="yaml">📄 YAML 配置</button>
+							<button type="button" class="source-type-btn ${type === "nodes" ? "active" : ""}" data-action="change-source-type" data-id="${escapeAttribute(source.id)}" data-type="nodes">⚡ 节点链接</button>
+						</div>
+						${check ? `<span class="badge ${check.error ? "fail" : "ok"}">${check.error ? "测试失败" : `节点 ${check.nodeCount}`}</span>` : ""}
+						<button class="btn btn-secondary btn-small" data-action="test-source" data-id="${escapeAttribute(source.id)}">测试</button>
+						<button class="btn btn-danger btn-small" data-action="remove-source" data-id="${escapeAttribute(source.id)}">删除</button>
+					</div>
+				</div>
+				<div class="input-grid">
+					<div class="input-grid two">
+						<div class="field">
+							<label>来源名称</label>
+							<input data-source-field="name" value="${escapeAttribute(source.name)}" placeholder="例如：德国01 或 机场主订阅" />
+						</div>
+						<div class="field">
+							<label>优先级</label>
+							<input data-source-field="priority" type="number" min="0" max="999" value="${Number(source.priority) || 0}" />
+						</div>
+					</div>
+					<div class="field">
+						<label>${labelText}</label>
+						${inputControl}
+					</div>
+					<div class="input-grid two">
+						<div class="field">
+							<label class="toggle-row"><input data-source-field="enabled" type="checkbox" ${source.enabled ? "checked" : ""} />启用这个来源</label>
+						</div>
+						<div class="field">
+							<label>备注</label>
+							<input data-source-field="notes" value="${escapeAttribute(source.notes || "")}" placeholder="记录用途、套餐或节点属性" />
+						</div>
+					</div>
+				</div>
+			</div>
+		`;
+	}
+
+	function renderRuleCard(rule, index) {
 	return `
 		<div class="item-card" data-rule-id="${escapeAttribute(rule.id)}">
 			<div class="item-card-header">
@@ -1391,20 +1420,25 @@ function syncDraftConfig() {
 	}
 
 	const sourcesEditor = document.querySelector('[data-editor="sources"]');
-	if (sourcesEditor) {
-		state.config.sources = [...sourcesEditor.querySelectorAll("[data-source-id]")].map((card) => ({
-			id: card.dataset.sourceId,
-			name: card.querySelector('[data-source-field="name"]').value,
-			url: (card.querySelector('[data-source-field="url"]') || card.querySelector('[data-source-field="v2rayUrl"]') || card.querySelector('[data-source-field="clashUrl"]'))?.value || "",
-			v2rayUrl: (card.querySelector('[data-source-field="url"]') || card.querySelector('[data-source-field="v2rayUrl"]'))?.value || "",
-			clashUrl: "",
-			enabled: card.querySelector('[data-source-field="enabled"]').checked,
-			priority: Number(card.querySelector('[data-source-field="priority"]').value || 0),
-			notes: card.querySelector('[data-source-field="notes"]').value,
-		}));
-	}
+		if (sourcesEditor) {
+			state.config.sources = [...sourcesEditor.querySelectorAll("[data-source-id]")].map((card) => {
+				const currentType = card.dataset.sourceType || "url";
+				const rawContent = (card.querySelector('[data-source-field="url"]') || card.querySelector('[data-source-field="v2rayUrl"]') || card.querySelector('[data-source-field="clashUrl"]'))?.value || "";
+				return {
+					id: card.dataset.sourceId,
+					type: currentType,
+					name: card.querySelector('[data-source-field="name"]').value,
+					url: rawContent,
+					v2rayUrl: rawContent,
+					clashUrl: "",
+					enabled: card.querySelector('[data-source-field="enabled"]').checked,
+					priority: Number(card.querySelector('[data-source-field="priority"]').value || 0),
+					notes: card.querySelector('[data-source-field="notes"]').value,
+				};
+			});
+		}
 
-	const rulesEditor = document.querySelector('[data-editor="rules"]');
+		const rulesEditor = document.querySelector('[data-editor="rules"]');
 	if (rulesEditor) {
 		state.config.renameRules = [...rulesEditor.querySelectorAll("[data-rule-id]")].map((card) => ({
 			id: card.dataset.ruleId,
@@ -1648,9 +1682,10 @@ function applyBatchTransform() {
 	}
 }
 
-function blankSource() {
+function blankSource(type = "url") {
 	return {
 		id: crypto.randomUUID(),
+		type: type,
 		name: "",
 		url: "",
 		v2rayUrl: "",
